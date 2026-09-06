@@ -55,6 +55,19 @@ mod tests {
     }
 
     #[test]
+    fn suggests_policy_operators_after_bang() {
+        let suggestions = complete("!");
+        assert!(suggestions.contains(&"WITH".to_string()));
+        assert!(suggestions.contains(&"SAVE".to_string()));
+        assert!(suggestions.contains(&"CONCURRENTLY".to_string()));
+    }
+
+    #[test]
+    fn suggests_quota_placeholder_after_save() {
+        assert_eq!(complete("! SAVE"), vec!["<percent>%<resource>".to_string()]);
+    }
+
+    #[test]
     fn does_not_suggest_operators_after_an_operator() {
         // Spec section 15: SEE/EDIT/MOVE/COPY must not appear as suggestions
         // once a verb slot has already been filled by another verb.

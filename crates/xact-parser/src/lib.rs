@@ -1,23 +1,27 @@
-//! Grammatical parsing of Xact `£` command lines into a typed AST.
+//! Grammatical parsing of Xact input lines into a typed AST.
 //!
 //! The parser is the single source of truth for "what can legally come
 //! next" (spec section 15): both diagnostics (section 24) and completion
 //! (`xact-completion`) read the `expected` list off a [`ParseOutcome`]
 //! rather than maintaining a separate grammar.
 //!
-//! Phase 1 scope: the `£` imperative language (verbs, ownership, references)
-//! and the `THEY are "..."` identity declaration. `!` policy blocks and `@`
-//! agent blocks are recognised only far enough to report "not supported yet".
+//! Scope so far: the `£` imperative language (verbs, ownership, references),
+//! the `THEY are "..."` identity declaration, and the `!` policy language
+//! (spec section 8). `@` agent blocks are recognised only far enough to
+//! report "not supported yet".
 
-use xact_ast::{Command, IdentityDeclaration, ImperativeCommand, Operand, OwnershipKind, ReferenceKind, Span, Verb};
+use xact_ast::{
+    Command, IdentityDeclaration, ImperativeCommand, Line, Operand, OwnershipKind, PolicyArgKind, PolicyArgs,
+    PolicyOperator, PolicyStatement, ReferenceKind, ResourceQuota, Span, Verb,
+};
 use xact_diagnostics::Diagnostic;
 use xact_lexer::{tokenize, Token, TokenKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseOutcome {
-    /// A grammatically complete, executable program (still subject to
+    /// A grammatically complete, executable line (still subject to
     /// semantic/ownership/reference/policy validation downstream).
-    Complete(Command),
+    Complete(Line),
     /// A valid prefix that needs more input (spec section 18: an
     /// incomplete draft, not yet an executable program).
     Incomplete(Diagnostic),
@@ -31,9 +35,8 @@ pub fn parse_line(input: &str) -> ParseOutcome {
 }
 
 fn top_level_expected() -> Vec<String> {
-    Verb::ALL
-        .iter()
-        .map(|v| v.as_str().to_string())
+    std::iter::once("!".to_string())
+        .chain(Verb::ALL.iter().map(|v| v.as_str().to_string()))
         .chain(std::iter::once("THEY".to_string()))
         .collect()
 }
@@ -47,19 +50,22 @@ fn operand_expected() -> Vec<String> {
         .collect()
 }
 
+fn policy_operator_expected() -> Vec<String> {
+    PolicyOperator::ALL.iter().map(|op| op.as_str().to_string()).collect()
+}
+
 pub fn parse_tokens(tokens: &[Token]) -> ParseOutcome {
     let first = &tokens[0];
     match &first.kind {
         TokenKind::Eof => Diagnostic::incomplete("Expected a command.", first.span, vec!["£".into()]).into_incomplete(),
         TokenKind::Pound => parse_after_pound(tokens, 1),
-        TokenKind::Bang => {
-            Diagnostic::invalid("Policy blocks (!) are not supported yet.", first.span, vec!["£".into()]).into_invalid()
-        }
+        TokenKind::Bang => parse_policy(tokens, 1),
         TokenKind::At => {
             Diagnostic::invalid("Agent blocks (@) are not supported yet.", first.span, vec!["£".into()]).into_invalid()
         }
         TokenKind::Word(_) | TokenKind::StringLit(_) => {
-            Diagnostic::invalid("Commands must begin with £.", first.span, vec!["£".into()]).into_invalid()
+            Diagnostic::invalid("Commands must begin with £ or !.", first.span, vec!["£".into(), "!".into()])
+                .into_invalid()
         }
     }
 }
@@ -115,10 +121,10 @@ fn parse_identity(tokens: &[Token], they_idx: usize, they_span: Span) -> ParseOu
                         return Diagnostic::invalid("Identity declaration requires at least one member.", list_tok.span, vec![])
                             .into_invalid();
                     }
-                    ParseOutcome::Complete(Command::Identity(IdentityDeclaration {
+                    ParseOutcome::Complete(Line::Command(Command::Identity(IdentityDeclaration {
                         members,
                         span: Span::new(they_span.start, list_tok.span.end),
-                    }))
+                    })))
                 }
                 _ => Diagnostic::invalid(
                     "Expected a quoted member list (e.g. \"alice,bob\") after 'are'.",
@@ -140,12 +146,12 @@ fn parse_imperative(tokens: &[Token], idx: usize, verb: Verb, verb_span: Span) -
 
     let after = &tokens[next_idx];
     match &after.kind {
-        TokenKind::Eof => ParseOutcome::Complete(Command::Imperative(ImperativeCommand {
+        TokenKind::Eof => ParseOutcome::Complete(Line::Command(Command::Imperative(ImperativeCommand {
             verb,
             verb_span,
             operand: Some(operand),
             destination: None,
-        })),
+        }))),
         TokenKind::Word(w) if w.eq_ignore_ascii_case("to") => {
             let dest_idx = next_idx + 1;
             let (destination, end_idx) = match parse_operand(tokens, dest_idx, "'to'") {
@@ -156,12 +162,12 @@ fn parse_imperative(tokens: &[Token], idx: usize, verb: Verb, verb_span: Span) -
             if !matches!(trailing.kind, TokenKind::Eof) {
                 return Diagnostic::invalid("Unexpected input after destination.", trailing.span, vec![]).into_invalid();
             }
-            ParseOutcome::Complete(Command::Imperative(ImperativeCommand {
+            ParseOutcome::Complete(Line::Command(Command::Imperative(ImperativeCommand {
                 verb,
                 verb_span,
                 operand: Some(operand),
                 destination: Some(destination),
-            }))
+            })))
         }
         _ => Diagnostic::invalid(
             "Unexpected input; expected end of command or 'to'.",
@@ -246,6 +252,164 @@ fn parse_operand(tokens: &[Token], idx: usize, context: &str) -> Result<(Operand
     }
 }
 
+fn parse_policy(tokens: &[Token], idx: usize) -> ParseOutcome {
+    let tok = &tokens[idx];
+    match &tok.kind {
+        TokenKind::Eof => {
+            Diagnostic::incomplete("! requires a policy operator.", tok.span, policy_operator_expected()).into_incomplete()
+        }
+        TokenKind::Word(w) => match PolicyOperator::from_str(&w.to_uppercase()) {
+            Some(op) => parse_policy_args(tokens, idx + 1, op, tok.span),
+            None => {
+                Diagnostic::invalid(format!("Unknown policy operator '{w}'."), tok.span, policy_operator_expected())
+                    .into_invalid()
+            }
+        },
+        _ => Diagnostic::invalid("Expected a policy operator after !.", tok.span, policy_operator_expected())
+            .into_invalid(),
+    }
+}
+
+fn parse_policy_args(tokens: &[Token], idx: usize, op: PolicyOperator, op_span: Span) -> ParseOutcome {
+    match op.arg_kind() {
+        PolicyArgKind::None => {
+            let tok = &tokens[idx];
+            if !matches!(tok.kind, TokenKind::Eof) {
+                return Diagnostic::invalid(format!("{} takes no arguments.", op.as_str()), tok.span, vec![])
+                    .into_invalid();
+            }
+            ParseOutcome::Complete(Line::Policy(PolicyStatement {
+                operator: op,
+                operator_span: op_span,
+                args: PolicyArgs::None,
+            }))
+        }
+        PolicyArgKind::Capability => {
+            let tok = &tokens[idx];
+            let (name, name_span) = match &tok.kind {
+                TokenKind::Eof => {
+                    return Diagnostic::incomplete(
+                        format!("{} requires a capability.", op.as_str()),
+                        tok.span,
+                        vec!["<capability>".into()],
+                    )
+                    .into_incomplete()
+                }
+                TokenKind::Word(w) => (w.clone(), tok.span),
+                TokenKind::StringLit(s) => (s.clone(), tok.span),
+                _ => {
+                    return Diagnostic::invalid(
+                        format!("{} requires a capability.", op.as_str()),
+                        tok.span,
+                        vec!["<capability>".into()],
+                    )
+                    .into_invalid()
+                }
+            };
+            let after = &tokens[idx + 1];
+            if !matches!(after.kind, TokenKind::Eof) {
+                return Diagnostic::invalid("Unexpected input after policy capability.", after.span, vec![]).into_invalid();
+            }
+            ParseOutcome::Complete(Line::Policy(PolicyStatement {
+                operator: op,
+                operator_span: op_span,
+                args: PolicyArgs::Capability { name, span: name_span },
+            }))
+        }
+        PolicyArgKind::Condition => {
+            let tok = &tokens[idx];
+            let (text, text_span) = match &tok.kind {
+                TokenKind::Eof => {
+                    return Diagnostic::incomplete(
+                        format!("{} requires a condition.", op.as_str()),
+                        tok.span,
+                        vec!["<condition>".into()],
+                    )
+                    .into_incomplete()
+                }
+                TokenKind::Word(w) => (w.clone(), tok.span),
+                TokenKind::StringLit(s) => (s.clone(), tok.span),
+                _ => {
+                    return Diagnostic::invalid(
+                        format!("{} requires a condition.", op.as_str()),
+                        tok.span,
+                        vec!["<condition>".into()],
+                    )
+                    .into_invalid()
+                }
+            };
+            let after = &tokens[idx + 1];
+            if !matches!(after.kind, TokenKind::Eof) {
+                return Diagnostic::invalid("Unexpected input after policy condition.", after.span, vec![]).into_invalid();
+            }
+            ParseOutcome::Complete(Line::Policy(PolicyStatement {
+                operator: op,
+                operator_span: op_span,
+                args: PolicyArgs::Condition { text, span: text_span },
+            }))
+        }
+        PolicyArgKind::Quotas => parse_quotas(tokens, idx, op, op_span),
+    }
+}
+
+fn parse_quotas(tokens: &[Token], mut idx: usize, op: PolicyOperator, op_span: Span) -> ParseOutcome {
+    let mut quotas = Vec::new();
+    loop {
+        let tok = &tokens[idx];
+        match &tok.kind {
+            TokenKind::Eof => {
+                if quotas.is_empty() {
+                    return Diagnostic::incomplete(
+                        format!("{} requires at least one resource quota, e.g. 20%RAM.", op.as_str()),
+                        tok.span,
+                        vec!["<percent>%<resource>".into()],
+                    )
+                    .into_incomplete();
+                }
+                return ParseOutcome::Complete(Line::Policy(PolicyStatement {
+                    operator: op,
+                    operator_span: op_span,
+                    args: PolicyArgs::Quotas(quotas),
+                }));
+            }
+            TokenKind::Word(w) => match parse_quota(w, tok.span) {
+                Ok(quota) => {
+                    quotas.push(quota);
+                    idx += 1;
+                }
+                Err(message) => {
+                    return Diagnostic::invalid(message, tok.span, vec!["<percent>%<resource>".into()]).into_invalid();
+                }
+            },
+            _ => {
+                return Diagnostic::invalid(
+                    "Expected a resource quota, e.g. 20%RAM.",
+                    tok.span,
+                    vec!["<percent>%<resource>".into()],
+                )
+                .into_invalid()
+            }
+        }
+    }
+}
+
+fn parse_quota(word: &str, span: Span) -> Result<ResourceQuota, String> {
+    let Some((percent_str, resource)) = word.split_once('%') else {
+        return Err(format!("'{word}' is not a resource quota (expected e.g. 20%RAM)."));
+    };
+    let Ok(percent) = percent_str.parse::<u32>() else {
+        return Err(format!("'{percent_str}' is not a valid percentage in '{word}'."));
+    };
+    if resource.is_empty() {
+        return Err(format!("'{word}' is missing a resource name (expected e.g. 20%RAM)."));
+    }
+    Ok(ResourceQuota {
+        percent,
+        resource: resource.to_uppercase(),
+        span,
+    })
+}
+
 trait IntoOutcome {
     fn into_incomplete(self) -> ParseOutcome;
     fn into_invalid(self) -> ParseOutcome;
@@ -265,22 +429,35 @@ mod tests {
     use super::*;
     use xact_ast::{OwnershipKind as Own, ReferenceKind as Ref};
 
+    fn command(outcome: ParseOutcome) -> Command {
+        match outcome {
+            ParseOutcome::Complete(Line::Command(cmd)) => cmd,
+            other => panic!("expected complete command, got {other:?}"),
+        }
+    }
+
+    fn policy(outcome: ParseOutcome) -> PolicyStatement {
+        match outcome {
+            ParseOutcome::Complete(Line::Policy(stmt)) => stmt,
+            other => panic!("expected complete policy, got {other:?}"),
+        }
+    }
+
     #[test]
     fn complete_see_with_owned_path() {
-        match parse_line("£ SEE MY ~/Documents") {
-            ParseOutcome::Complete(Command::Imperative(cmd)) => {
-                assert_eq!(cmd.verb, Verb::See);
-                match cmd.operand {
-                    Some(Operand::Owned { kind, path, .. }) => {
-                        assert_eq!(kind, Own::My);
-                        assert_eq!(path, "~/Documents");
-                    }
-                    other => panic!("expected owned operand, got {other:?}"),
-                }
-                assert_eq!(cmd.destination, None);
+        let cmd = match command(parse_line("£ SEE MY ~/Documents")) {
+            Command::Imperative(cmd) => cmd,
+            other => panic!("expected imperative, got {other:?}"),
+        };
+        assert_eq!(cmd.verb, Verb::See);
+        match cmd.operand {
+            Some(Operand::Owned { kind, path, .. }) => {
+                assert_eq!(kind, Own::My);
+                assert_eq!(path, "~/Documents");
             }
-            other => panic!("expected complete imperative, got {other:?}"),
+            other => panic!("expected owned operand, got {other:?}"),
         }
+        assert_eq!(cmd.destination, None);
     }
 
     #[test]
@@ -318,68 +495,124 @@ mod tests {
     fn grammatically_complete_reference_operand_is_accepted() {
         // Whether THAT actually resolves is a semantic concern (xact-semantic),
         // not a grammar concern — spec section 19's layered pipeline.
-        match parse_line("£ COPY THAT") {
-            ParseOutcome::Complete(Command::Imperative(cmd)) => match cmd.operand {
-                Some(Operand::Reference { kind, .. }) => assert_eq!(kind, Ref::That),
-                other => panic!("expected reference operand, got {other:?}"),
-            },
-            other => panic!("expected complete, got {other:?}"),
+        let cmd = match command(parse_line("£ COPY THAT")) {
+            Command::Imperative(cmd) => cmd,
+            other => panic!("expected imperative, got {other:?}"),
+        };
+        match cmd.operand {
+            Some(Operand::Reference { kind, .. }) => assert_eq!(kind, Ref::That),
+            other => panic!("expected reference operand, got {other:?}"),
         }
     }
 
     #[test]
     fn complete_copy_with_destination() {
-        match parse_line("£ COPY THAT to OUR ~/backup") {
-            ParseOutcome::Complete(Command::Imperative(cmd)) => {
-                assert_eq!(cmd.verb, Verb::Copy);
-                match cmd.destination {
-                    Some(Operand::Owned { kind, path, .. }) => {
-                        assert_eq!(kind, Own::Our);
-                        assert_eq!(path, "~/backup");
-                    }
-                    other => panic!("expected owned destination, got {other:?}"),
-                }
+        let cmd = match command(parse_line("£ COPY THAT to OUR ~/backup")) {
+            Command::Imperative(cmd) => cmd,
+            other => panic!("expected imperative, got {other:?}"),
+        };
+        assert_eq!(cmd.verb, Verb::Copy);
+        match cmd.destination {
+            Some(Operand::Owned { kind, path, .. }) => {
+                assert_eq!(kind, Own::Our);
+                assert_eq!(path, "~/backup");
             }
-            other => panic!("expected complete, got {other:?}"),
+            other => panic!("expected owned destination, got {other:?}"),
         }
     }
 
     #[test]
     fn complete_identity_declaration() {
-        match parse_line("£ THEY are \"alice,bob\"") {
-            ParseOutcome::Complete(Command::Identity(decl)) => {
+        match command(parse_line("£ THEY are \"alice,bob\"")) {
+            Command::Identity(decl) => {
                 assert_eq!(decl.members, vec!["alice".to_string(), "bob".to_string()]);
             }
-            other => panic!("expected complete identity, got {other:?}"),
+            other => panic!("expected identity, got {other:?}"),
         }
     }
 
     #[test]
     fn run_takes_string_operand() {
-        match parse_line("£ RUN 'chrome'") {
-            ParseOutcome::Complete(Command::Imperative(cmd)) => {
-                assert_eq!(cmd.verb, Verb::Run);
-                match cmd.operand {
-                    Some(Operand::StringArg { value, .. }) => assert_eq!(value, "chrome"),
-                    other => panic!("expected string operand, got {other:?}"),
-                }
-            }
-            other => panic!("expected complete, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn policy_block_rejected_in_phase_one() {
-        match parse_line("! SAVE 20%RAM") {
-            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("Policy blocks")),
-            other => panic!("expected invalid, got {other:?}"),
+        let cmd = match command(parse_line("£ RUN 'chrome'")) {
+            Command::Imperative(cmd) => cmd,
+            other => panic!("expected imperative, got {other:?}"),
+        };
+        assert_eq!(cmd.verb, Verb::Run);
+        match cmd.operand {
+            Some(Operand::StringArg { value, .. }) => assert_eq!(value, "chrome"),
+            other => panic!("expected string operand, got {other:?}"),
         }
     }
 
     #[test]
     fn missing_pound_rejected() {
         match parse_line("SEE MY ~/Documents") {
-            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("must begin with £")),
+            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("must begin with")),
+            other => panic!("expected invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_save_with_quotas() {
+        let stmt = policy(parse_line("! SAVE 20%RAM 30%CPU"));
+        assert_eq!(stmt.operator, PolicyOperator::Save);
+        match stmt.args {
+            PolicyArgs::Quotas(quotas) => {
+                assert_eq!(quotas.len(), 2);
+                assert_eq!(quotas[0].percent, 20);
+                assert_eq!(quotas[0].resource, "RAM");
+                assert_eq!(quotas[1].percent, 30);
+                assert_eq!(quotas[1].resource, "CPU");
+            }
+            other => panic!("expected quotas, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_save_incomplete_without_quota() {
+        match parse_line("! SAVE") {
+            ParseOutcome::Incomplete(diag) => assert!(diag.message.contains("requires at least one resource quota")),
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_with_capability() {
+        let stmt = policy(parse_line("! WITH 'network'"));
+        assert_eq!(stmt.operator, PolicyOperator::With);
+        match stmt.args {
+            PolicyArgs::Capability { name, .. } => assert_eq!(name, "network"),
+            other => panic!("expected capability, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_concurrently_takes_no_args() {
+        let stmt = policy(parse_line("! CONCURRENTLY"));
+        assert_eq!(stmt.operator, PolicyOperator::Concurrently);
+        assert_eq!(stmt.args, PolicyArgs::None);
+    }
+
+    #[test]
+    fn policy_concurrently_rejects_trailing_input() {
+        match parse_line("! CONCURRENTLY now") {
+            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("takes no arguments")),
+            other => panic!("expected invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_unknown_operator_rejected() {
+        match parse_line("! FROBNICATE") {
+            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("Unknown policy operator")),
+            other => panic!("expected invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_bad_quota_shape_rejected() {
+        match parse_line("! SAVE RAM") {
+            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("not a resource quota")),
             other => panic!("expected invalid, got {other:?}"),
         }
     }

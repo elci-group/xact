@@ -41,6 +41,7 @@ dependencies = [
  "xact-completion",
  "xact-diagnostics",
  "xact-parser",
+ "xact-policy",
  "xact-reference",
  "xact-semantic",
 ]
@@ -79,6 +80,10 @@ version = "0.1.0"
 [[package]]
 name = "xact-policy"
 version = "0.1.0"
+dependencies = [
+ "xact-ast",
+ "xact-diagnostics",
+]
 
 [[package]]
 name = "xact-process"

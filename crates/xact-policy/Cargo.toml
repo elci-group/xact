@@ -3,3 +3,7 @@ name = "xact-policy"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+
+[dependencies]
+xact-ast = { workspace = true }
+xact-diagnostics = { workspace = true }

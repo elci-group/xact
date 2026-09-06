@@ -1,5 +1,5 @@
 //! Session state that ties the deterministic pipeline together:
-//! lex -> parse -> semantic validation -> reference/identity update.
+//! lex -> parse -> semantic/policy validation -> reference/identity/policy update.
 //!
 //! `xact-core` deliberately stops at *validation*, not execution. Turning a
 //! [`xact_ast::Command`] into an [`ExecutionPlan`](https://) and running it
@@ -8,17 +8,22 @@
 //! therefore means "grammatically and semantically valid, ready to plan",
 //! not "ran".
 
-use xact_ast::Command;
+use xact_ast::{Command, Line, PolicyStatement};
 use xact_diagnostics::Diagnostic;
 use xact_parser::{parse_line, ParseOutcome};
+use xact_policy::PolicyContext;
 use xact_reference::ReferenceContext;
 use xact_semantic::{validate, IdentityContext};
 
 #[derive(Debug, Clone)]
 pub enum SessionOutcome {
-    /// Grammatically and semantically valid — ready for the (not yet
-    /// implemented) planner/executor.
+    /// A grammatically and semantically valid command — ready for the (not
+    /// yet implemented) planner/executor.
     Accepted(Command),
+    /// A grammatically valid, internally consistent policy statement — now
+    /// part of this session's active policy context. Not yet enforced by
+    /// any executor.
+    PolicyAccepted(PolicyStatement),
     /// A valid prefix that needs more input before it can be evaluated.
     Incomplete(Diagnostic),
     /// Cannot be accepted as typed.
@@ -29,6 +34,7 @@ pub enum SessionOutcome {
 pub struct Session {
     identity: IdentityContext,
     references: ReferenceContext,
+    policy: PolicyContext,
 }
 
 impl Session {
@@ -38,7 +44,7 @@ impl Session {
 
     pub fn submit(&mut self, input: &str) -> SessionOutcome {
         match parse_line(input) {
-            ParseOutcome::Complete(command) => match validate(command, &self.identity, &self.references) {
+            ParseOutcome::Complete(Line::Command(command)) => match validate(command, &self.identity, &self.references) {
                 Ok(validated) => {
                     if let Command::Identity(decl) = &validated.command {
                         self.identity.set(decl.members.clone());
@@ -50,15 +56,20 @@ impl Session {
                 }
                 Err(diagnostics) => SessionOutcome::Rejected(diagnostics),
             },
+            ParseOutcome::Complete(Line::Policy(stmt)) => match xact_policy::apply(stmt, &mut self.policy) {
+                Ok(applied) => SessionOutcome::PolicyAccepted(applied),
+                Err(diagnostic) => SessionOutcome::Rejected(vec![diagnostic]),
+            },
             ParseOutcome::Incomplete(diag) => SessionOutcome::Incomplete(diag),
             ParseOutcome::Invalid(diag) => SessionOutcome::Rejected(vec![diag]),
         }
     }
 
     /// Deterministic valid-next-token suggestions for the given draft
-    /// input (spec section 15), independent of `submit`.
+    /// input (spec section 15), filtered for policy operators already
+    /// singleton-established in this session (spec section 16).
     pub fn complete(&self, input: &str) -> Vec<String> {
-        xact_completion::complete(input)
+        self.policy.filter_suggestions(xact_completion::complete(input))
     }
 }
 
@@ -103,5 +114,41 @@ mod tests {
     fn incomplete_draft_is_not_accepted() {
         let mut session = Session::new();
         assert!(matches!(session.submit("£ COPY MY"), SessionOutcome::Incomplete(_)));
+    }
+
+    #[test]
+    fn policy_statement_accepted_and_tracked_across_session() {
+        let mut session = Session::new();
+        assert!(matches!(
+            session.submit("! SAVE 20%RAM 30%CPU"),
+            SessionOutcome::PolicyAccepted(_)
+        ));
+        assert!(matches!(
+            session.submit("£ RUN 'chrome'"),
+            SessionOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn conflicting_policy_statements_rejected() {
+        let mut session = Session::new();
+        assert!(matches!(
+            session.submit("! CONCURRENTLY"),
+            SessionOutcome::PolicyAccepted(_)
+        ));
+        assert!(matches!(
+            session.submit("! CONSECUTIVELY"),
+            SessionOutcome::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn completion_drops_schedule_operators_once_established() {
+        let mut session = Session::new();
+        session.submit("! CONCURRENTLY");
+        let suggestions = session.complete("!");
+        assert!(!suggestions.contains(&"CONCURRENTLY".to_string()));
+        assert!(!suggestions.contains(&"CONSECUTIVELY".to_string()));
+        assert!(suggestions.contains(&"WITH".to_string()));
     }
 }

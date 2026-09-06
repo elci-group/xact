@@ -1,8 +1,8 @@
 //! Typed AST for the Xact `£` imperative language (spec section 7),
-//! ownership vocabulary (section 10) and reference vocabulary (section 11).
+//! ownership vocabulary (section 10), reference vocabulary (section 11),
+//! and `!` policy language (spec section 8).
 //!
-//! Phase 1 scope only: the policy (`!`) and agent (`@`) languages are not
-//! modelled yet.
+//! The agent (`@`) language is not modelled yet.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
@@ -181,4 +181,143 @@ pub struct IdentityDeclaration {
 pub enum Command {
     Imperative(ImperativeCommand),
     Identity(IdentityDeclaration),
+}
+
+/// The `!` policy operators (spec section 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyOperator {
+    With,
+    Without,
+    Prefer,
+    Dodge,
+    Spend,
+    Save,
+    Concurrently,
+    Consecutively,
+    When,
+}
+
+/// What shape of argument a policy operator takes — grammar metadata the
+/// parser uses to decide how to consume the rest of the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyArgKind {
+    /// `CONCURRENTLY` / `CONSECUTIVELY` — a bare scheduling mode, no args.
+    None,
+    /// `WITH`/`WITHOUT`/`PREFER`/`DODGE` — a single named capability.
+    Capability,
+    /// `SPEND`/`SAVE` — one or more resource quotas, e.g. `20%RAM 30%CPU`.
+    Quotas,
+    /// `WHEN` — a condition. Phase 2 stores this as opaque text; a real
+    /// condition language is future work.
+    Condition,
+}
+
+impl PolicyOperator {
+    pub const ALL: [PolicyOperator; 9] = [
+        PolicyOperator::With,
+        PolicyOperator::Without,
+        PolicyOperator::Prefer,
+        PolicyOperator::Dodge,
+        PolicyOperator::Spend,
+        PolicyOperator::Save,
+        PolicyOperator::Concurrently,
+        PolicyOperator::Consecutively,
+        PolicyOperator::When,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PolicyOperator::With => "WITH",
+            PolicyOperator::Without => "WITHOUT",
+            PolicyOperator::Prefer => "PREFER",
+            PolicyOperator::Dodge => "DODGE",
+            PolicyOperator::Spend => "SPEND",
+            PolicyOperator::Save => "SAVE",
+            PolicyOperator::Concurrently => "CONCURRENTLY",
+            PolicyOperator::Consecutively => "CONSECUTIVELY",
+            PolicyOperator::When => "WHEN",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "WITH" => PolicyOperator::With,
+            "WITHOUT" => PolicyOperator::Without,
+            "PREFER" => PolicyOperator::Prefer,
+            "DODGE" => PolicyOperator::Dodge,
+            "SPEND" => PolicyOperator::Spend,
+            "SAVE" => PolicyOperator::Save,
+            "CONCURRENTLY" => PolicyOperator::Concurrently,
+            "CONSECUTIVELY" => PolicyOperator::Consecutively,
+            "WHEN" => PolicyOperator::When,
+            _ => return None,
+        })
+    }
+
+    pub fn arg_kind(&self) -> PolicyArgKind {
+        match self {
+            PolicyOperator::Concurrently | PolicyOperator::Consecutively => PolicyArgKind::None,
+            PolicyOperator::With | PolicyOperator::Without | PolicyOperator::Prefer | PolicyOperator::Dodge => {
+                PolicyArgKind::Capability
+            }
+            PolicyOperator::Spend | PolicyOperator::Save => PolicyArgKind::Quotas,
+            PolicyOperator::When => PolicyArgKind::Condition,
+        }
+    }
+
+    /// Hard constraints are evaluated before preferences (spec section 8)
+    /// and a soft preference may never override one (section 27's policy
+    /// invariant).
+    pub fn is_hard_constraint(&self) -> bool {
+        matches!(
+            self,
+            PolicyOperator::With | PolicyOperator::Without | PolicyOperator::Spend | PolicyOperator::Save
+        )
+    }
+
+    /// Scheduling mode is chosen once per block (spec section 16: a
+    /// singleton operator must not be suggested again once established).
+    pub fn is_singleton(&self) -> bool {
+        matches!(self, PolicyOperator::Concurrently | PolicyOperator::Consecutively)
+    }
+
+    /// The operator this one mutually excludes from the same block, if any
+    /// (spec section 16).
+    pub fn excludes(&self) -> Option<PolicyOperator> {
+        match self {
+            PolicyOperator::Concurrently => Some(PolicyOperator::Consecutively),
+            PolicyOperator::Consecutively => Some(PolicyOperator::Concurrently),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceQuota {
+    pub percent: u32,
+    pub resource: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyArgs {
+    None,
+    Capability { name: String, span: Span },
+    Quotas(Vec<ResourceQuota>),
+    Condition { text: String, span: Span },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyStatement {
+    pub operator: PolicyOperator,
+    pub operator_span: Span,
+    pub args: PolicyArgs,
+}
+
+/// One parsed input line: either a policy statement or an imperative/identity
+/// command (spec section 17: a block is made of both kinds of line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    Policy(PolicyStatement),
+    Command(Command),
 }
