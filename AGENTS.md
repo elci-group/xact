@@ -10,6 +10,8 @@ Xact shall be implemented entirely in **Rust**.
 
 Bash shall remain available as a compatibility shell. Xact is not Bash with a new parser, nor a natural-language wrapper around Bash.
 
+**Execution orchestration**: how Xact's execution planner hands validated work off to run is governed by a separate document, [`MESUT_INTEGRATION.md`](./MESUT_INTEGRATION.md) — the Xact–Mesut Technical Directive. That document also tracks current integration phase status; check it before assuming any Mesut-related capability described there is actually wired up.
+
 ---
 
 # 1. Core Objective

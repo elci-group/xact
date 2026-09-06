@@ -1,0 +1,11 @@
+[package]
+name = "xact-mesut"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+mesut = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
