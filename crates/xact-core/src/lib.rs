@@ -10,7 +10,7 @@
 //! far; every other verb reports itself unsupported rather than executing.
 
 use xact_agent::ValidatedAgentBlock;
-use xact_ast::{AgentBlock, Command, Line, PolicyStatement};
+use xact_ast::{AgentBlock, Command, Line, PolicyOperator, PolicyStatement};
 use xact_diagnostics::Diagnostic;
 use xact_parser::{parse_line, ParseOutcome};
 use xact_policy::PolicyContext;
@@ -89,6 +89,16 @@ impl Session {
     /// sections 20-21) — `xact-core` itself never plans or executes.
     pub fn references(&self) -> &ReferenceContext {
         &self.references
+    }
+
+    /// This session's established scheduling policy (spec section 23),
+    /// for a caller deciding whether to run an accepted command's plan
+    /// synchronously (`CONSECUTIVELY`, or no policy stated — today's
+    /// default sequential behavior already satisfies that) or as an
+    /// independent concurrent branch (`CONCURRENTLY` — see `xact-cli`,
+    /// which is the only crate that actually branches on this).
+    pub fn schedule(&self) -> Option<PolicyOperator> {
+        self.policy.schedule()
     }
 }
 

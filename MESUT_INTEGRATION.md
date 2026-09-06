@@ -21,6 +21,22 @@
 > `xact-see`/`xact-process` still own *how* each tool is invoked; `xact-executor` no longer calls
 > them directly — every plan variant goes through the adapter. See `crates/xact-mesut/src/lib.rs`
 > module docs for the full detail.
+>
+> **Phase 3 — done.** Spec section 23: `! CONCURRENTLY` "creates independent execution branches";
+> `! CONSECUTIVELY` creates an explicit dependency (`A → B`). `CONSECUTIVELY` needed no new
+> mechanism — blocking on each plan's real result before the next command is even read already is
+> `A → B`, and is also today's default with no schedule stated. `CONCURRENTLY` is now real: each
+> adapter function (`run_process`, `establish_path`, `view_directory`, `view_file`) has an
+> `_async` counterpart that admits the work onto Mesut and returns a `PendingTask` handle
+> immediately instead of blocking, and `xact-executor::execute_concurrent` wraps these into a
+> `Pending` handle typed as an `ExecutionOutcome`. `xact-cli` checks `session.schedule()` and, once
+> `! CONCURRENTLY` has been established, queues each subsequent command as an independent branch
+> instead of waiting on it, printing already-finished branches between prompts and joining
+> whatever's left at session end. Verified as real, not just deferred: three `£ RUN 'sleep 1'`
+> under `! CONCURRENTLY` finished in ~1.01s wall-clock (vs. ~3.02s for the same three sequentially)
+> — genuine parallelism on Mesut's blocking-executor thread pool (`mesut-blocking`'s
+> `num_cpus::get().max(2)` real OS threads), not simulated. Full test suite green, zero
+> regressions. See `crates/xact-mesut/src/lib.rs` module docs for the full detail.
 
 ---
 

@@ -35,12 +35,34 @@
 //! [`mesut::prelude::WorkKind::Blocking`] (a wait-for-exit subprocess —
 //! whether it's a naive `RUN`, `bank -p`, or inherited-stdio `gls`/`bat` —
 //! is exactly the "may stall a thread" work that kind exists for),
-//! submits it through a shared [`mesut::MesuT`] runtime via
-//! [`submit_blocking`], and reports back the real result. Those three
-//! crates still own *how* to run their respective tools (argv splitting,
-//! flag conventions, stdio inheritance); this crate only owns *handing
-//! that work to Mesut and getting the result back* — composition, not
-//! reimplementation (spec sections 3/12/13).
+//! submits it through a shared [`mesut::MesuT`] runtime, and reports back
+//! the real result. Those three crates still own *how* to run their
+//! respective tools (argv splitting, flag conventions, stdio inheritance);
+//! this crate only owns *handing that work to Mesut and getting the
+//! result back* — composition, not reimplementation (spec sections
+//! 3/12/13).
+//!
+//! # Phase 3 (this crate, now)
+//!
+//! Directive section 32's Phase 3: "Translate `CONCURRENTLY`/
+//! `CONSECUTIVELY` into Mesut execution constraints." Spec section 23:
+//! `CONCURRENTLY` "creates independent execution branches"; `CONSECUTIVELY`
+//! "creates an explicit dependency" (`A → B`).
+//!
+//! `CONSECUTIVELY` needs no new mechanism here: it's already what
+//! `run_process`/`establish_path`/`view_directory`/`view_file` do — submit,
+//! then block until the result is in, so the next command can't start
+//! until the previous one has genuinely finished. That *is* `A → B`.
+//!
+//! `CONCURRENTLY` needs a real independent branch: work that starts now
+//! and is joined later, so N submissions can be in flight on Mesut's
+//! blocking-executor thread pool at once (a real OS thread pool —
+//! `mesut-blocking`'s `num_cpus::get().max(2)` workers — not simulated
+//! parallelism). [`PendingTask`] is that handle, and `*_async` variants of
+//! each adapter function return one instead of blocking. `xact-executor`
+//! wraps these into its own `ExecutionOutcome`-typed handle; `xact-cli` is
+//! the only place that decides, from the session's established schedule
+//! policy, whether to call the blocking or the `_async` adapter function.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -102,15 +124,47 @@ fn shared_mesut() -> &'static MesuT {
     MESUT.get_or_init(runtime)
 }
 
-/// Runs `job` as blocking [`Work`] on the shared Mesut runtime and waits
-/// for its real result. `job` runs on a Mesut blocking-executor worker
-/// thread, not inline — stdio inheritance and captured output both work
-/// the same regardless of which OS thread spawns the child process, so
-/// this is transparent to callers that shell out.
-fn submit_blocking<T: Send + 'static>(
+/// A handle to blocking [`Work`] admitted onto the shared Mesut runtime.
+/// Submission (the call that produces this) has already happened — the
+/// job is genuinely running, or queued to run, on a Mesut worker thread —
+/// this only controls when *this caller* waits for the result.
+pub struct PendingTask<T> {
+    rx: std::sync::mpsc::Receiver<Result<T, String>>,
+}
+
+impl<T> PendingTask<T> {
+    /// Blocks until the real result is in.
+    pub fn join(self) -> Result<T, AdapterError> {
+        self.rx
+            .recv()
+            .map_err(|_| AdapterError("Mesut completed the task without a result".into()))?
+            .map_err(AdapterError)
+    }
+
+    /// Non-blocking poll: `None` means still running.
+    pub fn try_join(&mut self) -> Option<Result<T, AdapterError>> {
+        match self.rx.try_recv() {
+            Ok(result) => Some(result.map_err(AdapterError)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err(AdapterError("Mesut completed the task without a result".into())))
+            }
+        }
+    }
+}
+
+/// Admits `job` as blocking [`Work`] on the shared Mesut runtime and
+/// returns immediately with a handle to its real result. `job` runs on a
+/// Mesut blocking-executor worker thread, not inline — stdio inheritance
+/// and captured output both work the same regardless of which OS thread
+/// spawns the child process, so this is transparent to callers that shell
+/// out. This is the one place every adapter function funnels through;
+/// the blocking (`run_process`, etc.) and `_async` variants differ only in
+/// whether they call [`PendingTask::join`] before returning.
+fn submit<T: Send + 'static>(
     label: &'static str,
     job: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, AdapterError> {
+) -> Result<PendingTask<T>, AdapterError> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let work = Work::new(WorkKind::Blocking)
@@ -124,15 +178,20 @@ fn submit_blocking<T: Send + 'static>(
         .block_on(shared_mesut().submit(work))
         .map_err(|err| AdapterError(err.to_string()))?;
 
-    rx.recv()
-        .map_err(|_| AdapterError("Mesut completed the task without a result".into()))?
-        .map_err(AdapterError)
+    Ok(PendingTask { rx })
 }
 
 /// Runs `command_line` behind the Mesut adapter (`£ RUN`'s execution
 /// path). `xact-process` still does the actual launching.
 pub fn run_process(command_line: String) -> Result<ProcessOutcome, AdapterError> {
-    submit_blocking("xact.run", move || {
+    run_process_async(command_line)?.join()
+}
+
+/// Same as [`run_process`], but returns immediately as an independent
+/// branch (`£ RUN` under `! CONCURRENTLY`) instead of waiting for the
+/// process to exit.
+pub fn run_process_async(command_line: String) -> Result<PendingTask<ProcessOutcome>, AdapterError> {
+    submit("xact.run", move || {
         xact_process::run(&command_line)
             .map(|status| ProcessOutcome {
                 success: status.success(),
@@ -146,7 +205,13 @@ pub fn run_process(command_line: String) -> Result<ProcessOutcome, AdapterError>
 /// path). `xact-bank` still owns `bank -p <path>` and its file/directory
 /// disambiguation.
 pub fn establish_path(path: PathBuf) -> Result<PathBuf, AdapterError> {
-    submit_blocking("xact.create", move || {
+    establish_path_async(path)?.join()
+}
+
+/// Same as [`establish_path`], but returns immediately as an independent
+/// branch.
+pub fn establish_path_async(path: PathBuf) -> Result<PendingTask<PathBuf>, AdapterError> {
+    submit("xact.create", move || {
         xact_bank::establish(&path).map_err(|err| err.to_string())
     })
 }
@@ -154,7 +219,13 @@ pub fn establish_path(path: PathBuf) -> Result<PathBuf, AdapterError> {
 /// Shows a directory with `gls` behind the Mesut adapter (`£ SEE`'s
 /// directory routing).
 pub fn view_directory(path: PathBuf) -> Result<(), AdapterError> {
-    submit_blocking("xact.see.directory", move || {
+    view_directory_async(path)?.join()
+}
+
+/// Same as [`view_directory`], but returns immediately as an independent
+/// branch.
+pub fn view_directory_async(path: PathBuf) -> Result<PendingTask<()>, AdapterError> {
+    submit("xact.see.directory", move || {
         xact_see::view_directory(&path).map_err(|err| err.to_string())
     })
 }
@@ -162,7 +233,13 @@ pub fn view_directory(path: PathBuf) -> Result<(), AdapterError> {
 /// Shows a file with `bat` behind the Mesut adapter (`£ SEE`'s file
 /// routing).
 pub fn view_file(path: PathBuf) -> Result<(), AdapterError> {
-    submit_blocking("xact.see.file", move || {
+    view_file_async(path)?.join()
+}
+
+/// Same as [`view_file`], but returns immediately as an independent
+/// branch.
+pub fn view_file_async(path: PathBuf) -> Result<PendingTask<()>, AdapterError> {
+    submit("xact.see.file", move || {
         xact_see::view_file(&path).map_err(|err| err.to_string())
     })
 }
@@ -222,5 +299,40 @@ mod tests {
     fn view_directory_runs_gls_through_the_adapter() {
         let result = view_directory(std::env::temp_dir());
         assert!(result.is_ok(), "gls is expected to be installed and to succeed: {result:?}");
+    }
+
+    /// Proves `_async` submissions are genuinely concurrent branches, not
+    /// just a deferred API: three `sleep 1` processes started back-to-back
+    /// without waiting between them must all be done well under 3x a
+    /// single sleep's duration once joined, because they actually ran in
+    /// parallel on Mesut's blocking thread pool.
+    #[test]
+    fn async_submissions_run_concurrently_not_sequentially() {
+        let start = std::time::Instant::now();
+
+        let branches: Vec<_> = (0..3)
+            .map(|_| run_process_async("sleep 1".into()).expect("submission should be admitted"))
+            .collect();
+
+        for branch in branches {
+            let outcome = branch.join().expect("sleep should launch");
+            assert!(outcome.success);
+        }
+
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(2500),
+            "three concurrent 1s sleeps took {:?} — looks sequential, not concurrent",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn try_join_reports_none_while_still_running_then_some_once_done() {
+        let mut branch = run_process_async("sleep 1".into()).expect("submission should be admitted");
+
+        assert!(branch.try_join().is_none(), "should still be running immediately after submission");
+
+        let outcome = branch.join().expect("sleep should launch");
+        assert!(outcome.success);
     }
 }

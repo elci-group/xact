@@ -10,6 +10,16 @@
 //! each tool is actually invoked; this crate no longer calls them
 //! directly. Resource control (spec section 22) is not implemented — a
 //! run is not yet constrained by any `SPEND`/`SAVE` policy in effect.
+//!
+//! [`execute`] runs a plan and blocks for its real result — the right
+//! choice for `! CONSECUTIVELY` (spec section 23's `A → B`: the next
+//! command must not start until this one has genuinely finished) and for
+//! the default, no-policy-stated behavior, which is the same thing.
+//! [`execute_concurrent`] instead admits the plan onto Mesut and returns a
+//! [`Pending`] handle immediately — the adapter for `! CONCURRENTLY`'s
+//! "independent execution branches" (Xact–Mesut Integration Phase 3).
+//! `xact-cli` is the only caller that chooses between them, based on the
+//! session's established schedule policy.
 
 use std::path::PathBuf;
 
@@ -35,28 +45,113 @@ pub enum ExecutionOutcome {
 
 pub fn execute(plan: ExecutionPlan) -> ExecutionOutcome {
     match plan {
-        ExecutionPlan::Bank { path } => match xact_mesut::establish_path(path) {
-            Ok(path) => ExecutionOutcome::BankEstablished { path },
-            Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
-        },
-        ExecutionPlan::ViewDirectory { path } => match xact_mesut::view_directory(path.clone()) {
-            Ok(()) => ExecutionOutcome::Viewed { path, tool: "gls" },
-            Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
-        },
-        ExecutionPlan::ViewFile { path } => match xact_mesut::view_file(path.clone()) {
-            Ok(()) => ExecutionOutcome::Viewed { path, tool: "bat" },
-            Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
-        },
+        ExecutionPlan::Bank { path } => bank_outcome(xact_mesut::establish_path(path)),
+        ExecutionPlan::ViewDirectory { path } => {
+            view_outcome(path.clone(), "gls", xact_mesut::view_directory(path))
+        }
+        ExecutionPlan::ViewFile { path } => view_outcome(path.clone(), "bat", xact_mesut::view_file(path)),
         ExecutionPlan::Run { command_line } => {
-            match xact_mesut::run_process(command_line.clone()) {
-                Ok(outcome) => ExecutionOutcome::RunCompleted {
-                    command_line,
-                    success: outcome.success,
-                    code: outcome.code,
-                },
-                Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+            run_outcome(command_line.clone(), xact_mesut::run_process(command_line))
+        }
+    }
+}
+
+/// Admits `plan` onto Mesut as an independent branch and returns
+/// immediately (`! CONCURRENTLY`'s execution path — see the module
+/// docs). `Err` means Mesut rejected the submission itself (e.g. no
+/// executor available); a genuinely running branch is always `Ok`, and
+/// its eventual success/failure is only known once [`Pending::join`] or
+/// [`Pending::try_join`] reports it.
+pub fn execute_concurrent(plan: ExecutionPlan) -> Result<Pending, ExecutionOutcome> {
+    let submission_failed = |err: xact_mesut::AdapterError| ExecutionOutcome::Failed { message: err.to_string() };
+
+    match plan {
+        ExecutionPlan::Bank { path } => xact_mesut::establish_path_async(path)
+            .map(|task| Pending(PendingKind::Bank { task }))
+            .map_err(submission_failed),
+        ExecutionPlan::ViewDirectory { path } => xact_mesut::view_directory_async(path.clone())
+            .map(|task| Pending(PendingKind::View { path, tool: "gls", task }))
+            .map_err(submission_failed),
+        ExecutionPlan::ViewFile { path } => xact_mesut::view_file_async(path.clone())
+            .map(|task| Pending(PendingKind::View { path, tool: "bat", task }))
+            .map_err(submission_failed),
+        ExecutionPlan::Run { command_line } => xact_mesut::run_process_async(command_line.clone())
+            .map(|task| Pending(PendingKind::Run { command_line, task }))
+            .map_err(submission_failed),
+    }
+}
+
+/// A concurrent branch admitted by [`execute_concurrent`], not yet joined.
+pub struct Pending(PendingKind);
+
+enum PendingKind {
+    Bank {
+        task: xact_mesut::PendingTask<PathBuf>,
+    },
+    View {
+        path: PathBuf,
+        tool: &'static str,
+        task: xact_mesut::PendingTask<()>,
+    },
+    Run {
+        command_line: String,
+        task: xact_mesut::PendingTask<xact_mesut::ProcessOutcome>,
+    },
+}
+
+impl Pending {
+    /// Blocks until this branch's real result is in.
+    pub fn join(self) -> ExecutionOutcome {
+        match self.0 {
+            PendingKind::Bank { task } => bank_outcome(task.join()),
+            PendingKind::View { path, tool, task } => view_outcome(path, tool, task.join()),
+            PendingKind::Run { command_line, task } => run_outcome(command_line, task.join()),
+        }
+    }
+
+    /// Non-blocking poll: `None` means the branch is still running.
+    pub fn try_join(&mut self) -> Option<ExecutionOutcome> {
+        match &mut self.0 {
+            PendingKind::Bank { task } => task.try_join().map(bank_outcome),
+            PendingKind::View { path, tool, task } => {
+                task.try_join().map(|result| view_outcome(path.clone(), tool, result))
+            }
+            PendingKind::Run { command_line, task } => {
+                task.try_join().map(|result| run_outcome(command_line.clone(), result))
             }
         }
+    }
+}
+
+fn bank_outcome(result: Result<PathBuf, xact_mesut::AdapterError>) -> ExecutionOutcome {
+    match result {
+        Ok(path) => ExecutionOutcome::BankEstablished { path },
+        Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+    }
+}
+
+fn view_outcome(
+    path: PathBuf,
+    tool: &'static str,
+    result: Result<(), xact_mesut::AdapterError>,
+) -> ExecutionOutcome {
+    match result {
+        Ok(()) => ExecutionOutcome::Viewed { path, tool },
+        Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+    }
+}
+
+fn run_outcome(
+    command_line: String,
+    result: Result<xact_mesut::ProcessOutcome, xact_mesut::AdapterError>,
+) -> ExecutionOutcome {
+    match result {
+        Ok(outcome) => ExecutionOutcome::RunCompleted {
+            command_line,
+            success: outcome.success,
+            code: outcome.code,
+        },
+        Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
     }
 }
 
@@ -128,5 +223,56 @@ mod tests {
             command_line: "xact-definitely-not-a-real-binary".into(),
         });
         assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
+    }
+
+    #[test]
+    fn concurrent_run_plans_actually_run_in_parallel() {
+        let start = std::time::Instant::now();
+
+        let branches: Vec<Pending> = (0..3)
+            .map(|_| {
+                execute_concurrent(ExecutionPlan::Run { command_line: "sleep 1".into() })
+                    .unwrap_or_else(|outcome| panic!("submission should be admitted: {outcome:?}"))
+            })
+            .collect();
+
+        for branch in branches {
+            assert_eq!(
+                branch.join(),
+                ExecutionOutcome::RunCompleted {
+                    command_line: "sleep 1".into(),
+                    success: true,
+                    code: Some(0),
+                }
+            );
+        }
+
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(2500),
+            "three concurrent branches took {:?} — looks sequential, not concurrent",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn concurrent_bank_plan_reports_via_try_join() {
+        let dir = std::env::temp_dir().join(format!("xact-executor-concurrent-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = dir.join("nested/dir/");
+
+        let mut branch = execute_concurrent(ExecutionPlan::Bank { path: target.clone() })
+            .unwrap_or_else(|outcome| panic!("submission should be admitted: {outcome:?}"));
+
+        let outcome = loop {
+            if let Some(outcome) = branch.try_join() {
+                break outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+
+        assert_eq!(outcome, ExecutionOutcome::BankEstablished { path: target.clone() });
+        assert!(dir.join("nested/dir").is_dir());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
