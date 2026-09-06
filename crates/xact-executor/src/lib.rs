@@ -2,10 +2,11 @@
 //! reports what actually happened. This is where real side effects occur —
 //! everything upstream (parsing, semantic validation, planning) is pure.
 //!
-//! Scope so far: [`ExecutionPlan::Bank`] dispatches to `xact-bank`, and
+//! Scope so far: [`ExecutionPlan::Bank`] dispatches to `xact-bank`,
 //! [`ExecutionPlan::ViewDirectory`]/[`ExecutionPlan::ViewFile`] dispatch to
-//! `xact-see`. Process supervision and resource control (spec section 22)
-//! are not implemented — there is nothing to supervise yet.
+//! `xact-see`, and [`ExecutionPlan::Run`] dispatches to `xact-process`.
+//! Resource control (spec section 22) is not implemented — a run is not
+//! yet constrained by any `SPEND`/`SAVE` policy in effect.
 
 use std::path::PathBuf;
 
@@ -17,6 +18,15 @@ pub enum ExecutionOutcome {
     /// A directory or file was shown via `gls`/`bat`, whose own inherited
     /// stdio already rendered the content — `tool` names which one ran.
     Viewed { path: PathBuf, tool: &'static str },
+    /// A process ran to completion. `success`/`code` report how it
+    /// exited — a nonzero exit is a normal outcome (e.g. `grep` finding no
+    /// matches), not an execution failure; [`ExecutionOutcome::Failed`] is
+    /// reserved for Xact itself being unable to launch the plan at all.
+    RunCompleted {
+        command_line: String,
+        success: bool,
+        code: Option<i32>,
+    },
     Failed { message: String },
 }
 
@@ -32,6 +42,14 @@ pub fn execute(plan: ExecutionPlan) -> ExecutionOutcome {
         },
         ExecutionPlan::ViewFile { path } => match xact_see::view_file(&path) {
             Ok(()) => ExecutionOutcome::Viewed { path, tool: "bat" },
+            Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+        },
+        ExecutionPlan::Run { command_line } => match xact_process::run(&command_line) {
+            Ok(status) => ExecutionOutcome::RunCompleted {
+                command_line,
+                success: status.success(),
+                code: status.code(),
+            },
             Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
         },
     }
@@ -67,5 +85,43 @@ mod tests {
                 tool: "gls"
             }
         );
+    }
+
+    #[test]
+    fn run_plan_reports_success() {
+        let outcome = execute(ExecutionPlan::Run {
+            command_line: "true".into(),
+        });
+        assert_eq!(
+            outcome,
+            ExecutionOutcome::RunCompleted {
+                command_line: "true".into(),
+                success: true,
+                code: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn run_plan_reports_nonzero_exit_as_completed_not_failed() {
+        let outcome = execute(ExecutionPlan::Run {
+            command_line: "false".into(),
+        });
+        assert_eq!(
+            outcome,
+            ExecutionOutcome::RunCompleted {
+                command_line: "false".into(),
+                success: false,
+                code: Some(1),
+            }
+        );
+    }
+
+    #[test]
+    fn run_plan_reports_missing_binary_as_failed() {
+        let outcome = execute(ExecutionPlan::Run {
+            command_line: "xact-definitely-not-a-real-binary".into(),
+        });
+        assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
     }
 }

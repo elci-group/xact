@@ -7,17 +7,19 @@
 //! spec section 11 describes (a resolved path is as far as "typed" goes so
 //! far; there is no filesystem-vs-process distinction yet).
 //!
-//! Scope so far: `CREATE` maps to the `bank` tool, and `SEE` maps to `gls`
-//! (directories) or `bat` (files) per section 21's table (the verb is the
-//! language-level intent; the tool is the execution backend the planner
-//! happens to choose for it — spec section 6/13's Xact-owns-intent,
-//! tool-owns-implementation split). Unlike `CREATE`, where one tool
-//! handles both files and directories internally, `SEE` has no single tool
-//! covering both — so the planner itself inspects the resolved path on
-//! disk to route to one or the other. Every other verb, and identity
-//! declarations, are reported as [`PlanOutcome::Unsupported`] — not
-//! silently dropped. Scheduling (section 23) and resource policy (section
-//! 22) are not consulted yet; that needs a real multi-command block model.
+//! Scope so far: `CREATE` maps to the `bank` tool, `SEE` maps to `gls`
+//! (directories) or `bat` (files), and `RUN` maps to native process
+//! execution — per section 21's table (the verb is the language-level
+//! intent; the tool, or "no tool, do it natively", is the execution
+//! backend the planner happens to choose for it — spec section 6/13's
+//! Xact-owns-intent, tool-owns-implementation split). Unlike `CREATE`,
+//! where one tool handles both files and directories internally, `SEE`
+//! has no single tool covering both — so the planner itself inspects the
+//! resolved path on disk to route to one or the other. Every other verb,
+//! and identity declarations, are reported as [`PlanOutcome::Unsupported`]
+//! — not silently dropped. Scheduling (section 23) and resource policy
+//! (section 22) are not consulted yet; that needs a real multi-command
+//! block model.
 
 use std::path::PathBuf;
 
@@ -32,6 +34,9 @@ pub enum ExecutionPlan {
     ViewDirectory { path: PathBuf },
     /// `SEE` on a file -> the `bat` tool.
     ViewFile { path: PathBuf },
+    /// `RUN` -> native process execution (spec section 21: no ELci tool
+    /// owns this).
+    Run { command_line: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +82,15 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
                     }
                 }
                 None => PlanOutcome::Unsupported("SEE's target did not resolve to a path.".into()),
+            }
+        }
+        xact_ast::Verb::Run => {
+            let Some(operand) = &cmd.operand else {
+                return PlanOutcome::Unsupported("RUN requires a program to run.".into());
+            };
+            match resolve_path(operand, references) {
+                Some(command_line) => PlanOutcome::Plan(ExecutionPlan::Run { command_line }),
+                None => PlanOutcome::Unsupported("RUN's target did not resolve to a command.".into()),
             }
         }
         other => PlanOutcome::Unsupported(format!("{} has no execution plan yet.", other.as_str())),
@@ -174,17 +188,55 @@ mod tests {
     fn other_verbs_are_unsupported_not_silently_dropped() {
         let references = ReferenceContext::new();
         let cmd = Command::Imperative(ImperativeCommand {
-            verb: Verb::Run,
+            verb: Verb::Delete,
             verb_span: Span::default(),
-            operand: Some(Operand::StringArg {
-                value: "chrome".into(),
+            operand: Some(Operand::Owned {
+                kind: OwnershipKind::My,
+                path: "~/x".into(),
                 span: Span::default(),
             }),
             destination: None,
         });
         match plan(&cmd, &references) {
-            PlanOutcome::Unsupported(reason) => assert!(reason.contains("RUN")),
+            PlanOutcome::Unsupported(reason) => assert!(reason.contains("DELETE")),
             other => panic!("expected unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_resolves_string_operand_to_a_command_line() {
+        let references = ReferenceContext::new();
+        let cmd = Command::Imperative(ImperativeCommand {
+            verb: Verb::Run,
+            verb_span: Span::default(),
+            operand: Some(Operand::StringArg {
+                value: "true".into(),
+                span: Span::default(),
+            }),
+            destination: None,
+        });
+        match plan(&cmd, &references) {
+            PlanOutcome::Plan(ExecutionPlan::Run { command_line }) => assert_eq!(command_line, "true"),
+            other => panic!("expected a run plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_resolves_reference_operand_to_a_command_line() {
+        let mut references = ReferenceContext::new();
+        references.record(ResolvedObject::Text("echo hi".into()));
+        let cmd = Command::Imperative(ImperativeCommand {
+            verb: Verb::Run,
+            verb_span: Span::default(),
+            operand: Some(Operand::Reference {
+                kind: ReferenceKind::That,
+                span: Span::default(),
+            }),
+            destination: None,
+        });
+        match plan(&cmd, &references) {
+            PlanOutcome::Plan(ExecutionPlan::Run { command_line }) => assert_eq!(command_line, "echo hi"),
+            other => panic!("expected a run plan, got {other:?}"),
         }
     }
 

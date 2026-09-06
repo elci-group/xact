@@ -4,9 +4,10 @@
 //!
 //! Once a command is accepted, the CLI plans it (`xact-planner`) and, if a
 //! plan exists, actually runs it (`xact-executor`): `£ CREATE ...` really
-//! creates the file or directory via the real `bank` binary, and
-//! `£ SEE ...` really shows it via `gls` (directories) or `bat` (files).
-//! Every other verb reports itself unsupported rather than silently doing
+//! creates the file or directory via the real `bank` binary, `£ SEE ...`
+//! really shows it via `gls` (directories) or `bat` (files), and
+//! `£ RUN ...` really spawns the process and waits for it to exit. Every
+//! other verb reports itself unsupported rather than silently doing
 //! nothing.
 //!
 //! `@` blocks may be typed across several lines for readability (matching
@@ -24,7 +25,7 @@ use xact_executor::ExecutionOutcome;
 use xact_planner::PlanOutcome;
 
 fn main() {
-    println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE and SEE actually run");
+    println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE, SEE, and RUN actually run");
     println!("Type a £ command, a ! policy statement, an @ agent block, or 'exit'.");
 
     let mut session = Session::new();
@@ -77,6 +78,14 @@ fn main() {
                         }
                         ExecutionOutcome::Viewed { path, tool } => {
                             println!("  {tool}: displayed {}", path.display());
+                        }
+                        ExecutionOutcome::RunCompleted { command_line, success, code } => {
+                            let status = match (success, code) {
+                                (true, _) => "exited 0".to_string(),
+                                (false, Some(code)) => format!("exited {code}"),
+                                (false, None) => "terminated by signal".to_string(),
+                            };
+                            println!("  ran '{command_line}' — {status}");
                         }
                         ExecutionOutcome::Failed { message } => {
                             println!("  execution failed: {message}");
