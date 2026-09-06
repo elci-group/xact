@@ -33,7 +33,7 @@ mod tests {
     fn suggests_verbs_and_they_at_start() {
         let suggestions = complete("£ ");
         assert!(suggestions.contains(&"SEE".to_string()));
-        assert!(suggestions.contains(&"BANK".to_string()));
+        assert!(suggestions.contains(&"CREATE".to_string()));
         assert!(suggestions.contains(&"THEY".to_string()));
     }
 

@@ -187,15 +187,17 @@ semantics when the requested operation is within `bank`'s responsibility.
 The semantic operation:
 
 ```text
-£ BANK MY ~/project/
+£ CREATE MY ~/project/
 ```
 
-shall resolve to an Xact `BankIntent`, which is then executed through the `bank` integration.
+shall resolve to an Xact `CreateIntent`, which is then executed through the `bank` integration.
+
+`CREATE` is the language-level command; `bank` is merely the process used to execute it — the same distinction section 12 draws between `BOUND` and the `bound` tool. Xact must not name a command after the tool that happens to implement it.
 
 For example:
 
 ```text
-£ BANK MY ~/project/src/main.rs
+£ CREATE MY ~/project/src/main.rs
 ```
 
 means:
@@ -221,6 +223,7 @@ PASTE
 CUT
 DELETE
 RUN
+CREATE
 ```
 
 Command execution begins with:
@@ -439,9 +442,11 @@ The adapter converts that representation into an invocation of `bound` or, where
 
 ---
 
-# 13. `BANK` as a Language Concept
+# 13. `CREATE` as a Language Concept
 
-`BANK` represents resource establishment.
+`CREATE` represents resource establishment.
+
+`CREATE` is the command the user types; `bank` is merely the process used to execute it — Xact must not conflate the two, just as `BOUND` (section 12) is not the same thing as the `bound` executable.
 
 It shall be backed by the existing `bank` tool rather than implemented as:
 
@@ -457,9 +462,9 @@ This creates a deliberate ELci composition boundary:
 ```text
 Xact
   │
-  ├── bank → resource establishment
+  ├── CREATE → bank → resource establishment
   │
-  └── bound → source aggregation
+  └── BOUND  → bound → source aggregation
 ```
 
 Xact owns **intent and orchestration**.
@@ -687,7 +692,7 @@ according to capability ownership.
 Examples:
 
 ```text
-BANK
+CREATE
     → bank
 
 BOUND
@@ -954,7 +959,7 @@ with the shell continuously explaining and completing the valid structure.
 For ELci-native capabilities:
 
 ```text
-£ BANK MY ~/project/src/main.rs
+£ CREATE MY ~/project/src/main.rs
 ```
 
 shall use `bank`.
@@ -1005,7 +1010,7 @@ That gives the ecosystem a powerful division of responsibility:
                  │
         ┌────────┼────────┐
         │        │        │
-      BANK     BOUND    other ELci tools
+      bank     bound    other ELci tools
         │        │        │
  resource    aggregation specialist
  creation                 capabilities

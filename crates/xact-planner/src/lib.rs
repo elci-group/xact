@@ -7,11 +7,14 @@
 //! spec section 11 describes (a resolved path is as far as "typed" goes so
 //! far; there is no filesystem-vs-process distinction yet).
 //!
-//! Scope so far: only `BANK` has a real plan, mapping to `xact-bank` per
-//! section 21's table. Every other verb, and identity declarations, are
-//! reported as [`PlanOutcome::Unsupported`] — not silently dropped.
-//! Scheduling (section 23) and resource policy (section 22) are not
-//! consulted yet; that needs a real multi-command block model.
+//! Scope so far: only `CREATE` has a real plan, mapping to the `bank` tool
+//! per section 21's table (`CREATE` is the language-level intent; `bank`
+//! is the execution backend the planner happens to choose for it — spec
+//! section 6/13's Xact-owns-intent, tool-owns-implementation split).
+//! Every other verb, and identity declarations, are reported as
+//! [`PlanOutcome::Unsupported`] — not silently dropped. Scheduling
+//! (section 23) and resource policy (section 22) are not consulted yet;
+//! that needs a real multi-command block model.
 
 use std::path::PathBuf;
 
@@ -20,7 +23,7 @@ use xact_reference::{ReferenceContext, ResolvedObject};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionPlan {
-    /// `BANK` -> `bank` (spec section 21).
+    /// `CREATE` -> the `bank` tool (spec section 21).
     Bank { path: PathBuf },
 }
 
@@ -37,15 +40,15 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
     };
 
     match cmd.verb {
-        xact_ast::Verb::Bank => {
+        xact_ast::Verb::Create => {
             let Some(operand) = &cmd.operand else {
-                return PlanOutcome::Unsupported("BANK requires a target.".into());
+                return PlanOutcome::Unsupported("CREATE requires a target.".into());
             };
             match resolve_path(operand, references) {
                 Some(path) => PlanOutcome::Plan(ExecutionPlan::Bank {
                     path: expand_tilde(&path),
                 }),
-                None => PlanOutcome::Unsupported("BANK's target did not resolve to a path.".into()),
+                None => PlanOutcome::Unsupported("CREATE's target did not resolve to a path.".into()),
             }
         }
         other => PlanOutcome::Unsupported(format!("{} has no execution plan yet.", other.as_str())),
@@ -81,9 +84,9 @@ mod tests {
     use super::*;
     use xact_ast::{ImperativeCommand, OwnershipKind, ReferenceKind, Span, Verb};
 
-    fn bank_command(operand: Operand) -> Command {
+    fn create_command(operand: Operand) -> Command {
         Command::Imperative(ImperativeCommand {
-            verb: Verb::Bank,
+            verb: Verb::Create,
             verb_span: Span::default(),
             operand: Some(operand),
             destination: None,
@@ -91,10 +94,10 @@ mod tests {
     }
 
     #[test]
-    fn bank_with_owned_path_expands_tilde() {
+    fn create_with_owned_path_expands_tilde() {
         std::env::set_var("HOME", "/home/testuser");
         let references = ReferenceContext::new();
-        let cmd = bank_command(Operand::Owned {
+        let cmd = create_command(Operand::Owned {
             kind: OwnershipKind::My,
             path: "~/project/src/main.rs".into(),
             span: Span::default(),
@@ -108,9 +111,9 @@ mod tests {
     }
 
     #[test]
-    fn bank_with_absolute_path_is_unchanged() {
+    fn create_with_absolute_path_is_unchanged() {
         let references = ReferenceContext::new();
-        let cmd = bank_command(Operand::Owned {
+        let cmd = create_command(Operand::Owned {
             kind: OwnershipKind::My,
             path: "/tmp/project/".into(),
             span: Span::default(),
@@ -124,10 +127,10 @@ mod tests {
     }
 
     #[test]
-    fn bank_with_reference_resolves_from_context() {
+    fn create_with_reference_resolves_from_context() {
         let mut references = ReferenceContext::new();
         references.record(ResolvedObject::Path("/tmp/from-reference".into()));
-        let cmd = bank_command(Operand::Reference {
+        let cmd = create_command(Operand::Reference {
             kind: ReferenceKind::That,
             span: Span::default(),
         });

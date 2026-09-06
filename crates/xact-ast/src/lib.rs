@@ -24,7 +24,12 @@ pub enum Verb {
     Cut,
     Delete,
     Run,
-    Bank,
+    /// `£ CREATE MY ~/project/` — establish a file or directory. This is a
+    /// language-level intent, distinct from `bank`, the tool that happens
+    /// to execute it (spec section 6/13's Xact-owns-intent,
+    /// tool-owns-implementation boundary — the same distinction section 12
+    /// draws between `BOUND` and the `bound` tool).
+    Create,
 }
 
 impl Verb {
@@ -37,7 +42,7 @@ impl Verb {
         Verb::Cut,
         Verb::Delete,
         Verb::Run,
-        Verb::Bank,
+        Verb::Create,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -50,7 +55,7 @@ impl Verb {
             Verb::Cut => "CUT",
             Verb::Delete => "DELETE",
             Verb::Run => "RUN",
-            Verb::Bank => "BANK",
+            Verb::Create => "CREATE",
         }
     }
 
@@ -64,7 +69,7 @@ impl Verb {
             "CUT" => Verb::Cut,
             "DELETE" => Verb::Delete,
             "RUN" => Verb::Run,
-            "BANK" => Verb::Bank,
+            "CREATE" => Verb::Create,
             _ => return None,
         })
     }

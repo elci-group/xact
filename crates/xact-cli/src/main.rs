@@ -4,7 +4,7 @@
 //!
 //! Once a command is accepted, the CLI plans it (`xact-planner`) and, if a
 //! plan exists, actually runs it (`xact-executor`) — so far that's only
-//! `£ BANK ...`, which really does create the file or directory via the
+//! `£ CREATE ...`, which really does create the file or directory via the
 //! real `bank` binary. Every other verb reports itself unsupported rather
 //! than silently doing nothing.
 //!
@@ -23,7 +23,7 @@ use xact_executor::ExecutionOutcome;
 use xact_planner::PlanOutcome;
 
 fn main() {
-    println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; BANK actually runs");
+    println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE actually runs");
     println!("Type a £ command, a ! policy statement, an @ agent block, or 'exit'.");
 
     let mut session = Session::new();

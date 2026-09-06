@@ -6,7 +6,7 @@
 //! ready to plan" — turning that into an `ExecutionPlan` and running it is
 //! `xact-planner`/`xact-executor`'s job (spec sections 20-21), which a
 //! caller invokes separately using [`Session::references`] (see
-//! `xact-cli` for the reference wiring). Only `BANK` has a real plan so
+//! `xact-cli` for the reference wiring). Only `CREATE` has a real plan so
 //! far; every other verb reports itself unsupported rather than executing.
 
 use xact_agent::ValidatedAgentBlock;
