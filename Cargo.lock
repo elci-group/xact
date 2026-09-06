@@ -68,6 +68,7 @@ version = "0.1.0"
 dependencies = [
  "xact-bank",
  "xact-planner",
+ "xact-see",
 ]
 
 [[package]]
@@ -115,6 +116,10 @@ dependencies = [
 
 [[package]]
 name = "xact-resource"
+version = "0.1.0"
+
+[[package]]
+name = "xact-see"
 version = "0.1.0"
 
 [[package]]

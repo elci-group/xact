@@ -25,4 +25,5 @@ xact-team = { path = "crates/xact-team" }
 xact-terminal = { path = "crates/xact-terminal" }
 xact-bound = { path = "crates/xact-bound" }
 xact-bank = { path = "crates/xact-bank" }
+xact-see = { path = "crates/xact-see" }
 xact-core = { path = "crates/xact-core" }

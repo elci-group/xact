@@ -7,14 +7,17 @@
 //! spec section 11 describes (a resolved path is as far as "typed" goes so
 //! far; there is no filesystem-vs-process distinction yet).
 //!
-//! Scope so far: only `CREATE` has a real plan, mapping to the `bank` tool
-//! per section 21's table (`CREATE` is the language-level intent; `bank`
-//! is the execution backend the planner happens to choose for it — spec
-//! section 6/13's Xact-owns-intent, tool-owns-implementation split).
-//! Every other verb, and identity declarations, are reported as
-//! [`PlanOutcome::Unsupported`] — not silently dropped. Scheduling
-//! (section 23) and resource policy (section 22) are not consulted yet;
-//! that needs a real multi-command block model.
+//! Scope so far: `CREATE` maps to the `bank` tool, and `SEE` maps to `gls`
+//! (directories) or `bat` (files) per section 21's table (the verb is the
+//! language-level intent; the tool is the execution backend the planner
+//! happens to choose for it — spec section 6/13's Xact-owns-intent,
+//! tool-owns-implementation split). Unlike `CREATE`, where one tool
+//! handles both files and directories internally, `SEE` has no single tool
+//! covering both — so the planner itself inspects the resolved path on
+//! disk to route to one or the other. Every other verb, and identity
+//! declarations, are reported as [`PlanOutcome::Unsupported`] — not
+//! silently dropped. Scheduling (section 23) and resource policy (section
+//! 22) are not consulted yet; that needs a real multi-command block model.
 
 use std::path::PathBuf;
 
@@ -25,6 +28,10 @@ use xact_reference::{ReferenceContext, ResolvedObject};
 pub enum ExecutionPlan {
     /// `CREATE` -> the `bank` tool (spec section 21).
     Bank { path: PathBuf },
+    /// `SEE` on a directory -> the `gls` tool.
+    ViewDirectory { path: PathBuf },
+    /// `SEE` on a file -> the `bat` tool.
+    ViewFile { path: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +56,27 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
                     path: expand_tilde(&path),
                 }),
                 None => PlanOutcome::Unsupported("CREATE's target did not resolve to a path.".into()),
+            }
+        }
+        xact_ast::Verb::See => {
+            let Some(operand) = &cmd.operand else {
+                return PlanOutcome::Unsupported("SEE requires a target.".into());
+            };
+            match resolve_path(operand, references) {
+                Some(raw) => {
+                    let path = expand_tilde(&raw);
+                    if path.is_dir() {
+                        PlanOutcome::Plan(ExecutionPlan::ViewDirectory { path })
+                    } else if path.is_file() {
+                        PlanOutcome::Plan(ExecutionPlan::ViewFile { path })
+                    } else {
+                        PlanOutcome::Unsupported(format!(
+                            "'{}' does not exist or is neither a file nor a directory.",
+                            path.display()
+                        ))
+                    }
+                }
+                None => PlanOutcome::Unsupported("SEE's target did not resolve to a path.".into()),
             }
         }
         other => PlanOutcome::Unsupported(format!("{} has no execution plan yet.", other.as_str())),
@@ -156,6 +184,65 @@ mod tests {
         });
         match plan(&cmd, &references) {
             PlanOutcome::Unsupported(reason) => assert!(reason.contains("RUN")),
+            other => panic!("expected unsupported, got {other:?}"),
+        }
+    }
+
+    fn see_command(operand: Operand) -> Command {
+        Command::Imperative(ImperativeCommand {
+            verb: Verb::See,
+            verb_span: Span::default(),
+            operand: Some(operand),
+            destination: None,
+        })
+    }
+
+    #[test]
+    fn see_on_a_directory_routes_to_gls() {
+        let references = ReferenceContext::new();
+        let cmd = see_command(Operand::Owned {
+            kind: OwnershipKind::My,
+            path: std::env::temp_dir().display().to_string(),
+            span: Span::default(),
+        });
+        match plan(&cmd, &references) {
+            PlanOutcome::Plan(ExecutionPlan::ViewDirectory { path }) => {
+                assert_eq!(path, std::env::temp_dir());
+            }
+            other => panic!("expected a view-directory plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn see_on_a_file_routes_to_bat() {
+        let file = std::env::temp_dir().join(format!("xact-planner-see-test-{}", std::process::id()));
+        std::fs::write(&file, "hello").unwrap();
+
+        let references = ReferenceContext::new();
+        let cmd = see_command(Operand::Owned {
+            kind: OwnershipKind::My,
+            path: file.display().to_string(),
+            span: Span::default(),
+        });
+        let result = plan(&cmd, &references);
+
+        let _ = std::fs::remove_file(&file);
+        match result {
+            PlanOutcome::Plan(ExecutionPlan::ViewFile { path }) => assert_eq!(path, file),
+            other => panic!("expected a view-file plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn see_on_a_nonexistent_path_is_unsupported() {
+        let references = ReferenceContext::new();
+        let cmd = see_command(Operand::Owned {
+            kind: OwnershipKind::My,
+            path: "/definitely/does/not/exist/xact-test".into(),
+            span: Span::default(),
+        });
+        match plan(&cmd, &references) {
+            PlanOutcome::Unsupported(reason) => assert!(reason.contains("does not exist")),
             other => panic!("expected unsupported, got {other:?}"),
         }
     }

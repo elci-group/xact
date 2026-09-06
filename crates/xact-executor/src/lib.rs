@@ -2,15 +2,21 @@
 //! reports what actually happened. This is where real side effects occur —
 //! everything upstream (parsing, semantic validation, planning) is pure.
 //!
-//! Scope so far: only [`ExecutionPlan::Bank`] exists to run, dispatched to
-//! `xact-bank`. Process supervision and resource control (spec section 22)
+//! Scope so far: [`ExecutionPlan::Bank`] dispatches to `xact-bank`, and
+//! [`ExecutionPlan::ViewDirectory`]/[`ExecutionPlan::ViewFile`] dispatch to
+//! `xact-see`. Process supervision and resource control (spec section 22)
 //! are not implemented — there is nothing to supervise yet.
+
+use std::path::PathBuf;
 
 use xact_planner::ExecutionPlan;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionOutcome {
-    BankEstablished { path: std::path::PathBuf },
+    BankEstablished { path: PathBuf },
+    /// A directory or file was shown via `gls`/`bat`, whose own inherited
+    /// stdio already rendered the content — `tool` names which one ran.
+    Viewed { path: PathBuf, tool: &'static str },
     Failed { message: String },
 }
 
@@ -18,6 +24,14 @@ pub fn execute(plan: ExecutionPlan) -> ExecutionOutcome {
     match plan {
         ExecutionPlan::Bank { path } => match xact_bank::establish(&path) {
             Ok(path) => ExecutionOutcome::BankEstablished { path },
+            Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+        },
+        ExecutionPlan::ViewDirectory { path } => match xact_see::view_directory(&path) {
+            Ok(()) => ExecutionOutcome::Viewed { path, tool: "gls" },
+            Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+        },
+        ExecutionPlan::ViewFile { path } => match xact_see::view_file(&path) {
+            Ok(()) => ExecutionOutcome::Viewed { path, tool: "bat" },
             Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
         },
     }
@@ -39,5 +53,19 @@ mod tests {
         assert!(dir.join("nested/dir").is_dir());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_directory_plan_runs_gls() {
+        let outcome = execute(ExecutionPlan::ViewDirectory {
+            path: std::env::temp_dir(),
+        });
+        assert_eq!(
+            outcome,
+            ExecutionOutcome::Viewed {
+                path: std::env::temp_dir(),
+                tool: "gls"
+            }
+        );
     }
 }
