@@ -739,10 +739,8 @@ dependencies = [
 name = "xact-executor"
 version = "0.1.0"
 dependencies = [
- "xact-bank",
  "xact-mesut",
  "xact-planner",
- "xact-see",
 ]
 
 [[package]]
@@ -758,7 +756,9 @@ version = "0.1.0"
 dependencies = [
  "mesut",
  "tokio",
+ "xact-bank",
  "xact-process",
+ "xact-see",
 ]
 
 [[package]]

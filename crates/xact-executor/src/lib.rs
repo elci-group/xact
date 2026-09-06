@@ -2,14 +2,14 @@
 //! reports what actually happened. This is where real side effects occur —
 //! everything upstream (parsing, semantic validation, planning) is pure.
 //!
-//! Scope so far: [`ExecutionPlan::Bank`] dispatches to `xact-bank`,
-//! [`ExecutionPlan::ViewDirectory`]/[`ExecutionPlan::ViewFile`] dispatch to
-//! `xact-see`, and [`ExecutionPlan::Run`] dispatches to `xact-mesut`'s
-//! execution adapter (Xact–Mesut Integration Phase 2 — see
-//! `MESUT_INTEGRATION.md`), which submits the real process launch as
-//! blocking work to a Mesut runtime instead of running it inline.
-//! Resource control (spec section 22) is not implemented — a run is not
-//! yet constrained by any `SPEND`/`SAVE` policy in effect.
+//! Scope so far: every variant dispatches through `xact-mesut`'s execution
+//! adapter (Xact–Mesut Integration Phase 2 — see `MESUT_INTEGRATION.md`),
+//! which submits the real external-tool call (`bank`, `gls`/`bat`, or a
+//! plain process launch) as blocking work to a Mesut runtime instead of
+//! running it inline. `xact-bank`/`xact-see`/`xact-process` still own how
+//! each tool is actually invoked; this crate no longer calls them
+//! directly. Resource control (spec section 22) is not implemented — a
+//! run is not yet constrained by any `SPEND`/`SAVE` policy in effect.
 
 use std::path::PathBuf;
 
@@ -35,15 +35,15 @@ pub enum ExecutionOutcome {
 
 pub fn execute(plan: ExecutionPlan) -> ExecutionOutcome {
     match plan {
-        ExecutionPlan::Bank { path } => match xact_bank::establish(&path) {
+        ExecutionPlan::Bank { path } => match xact_mesut::establish_path(path) {
             Ok(path) => ExecutionOutcome::BankEstablished { path },
             Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
         },
-        ExecutionPlan::ViewDirectory { path } => match xact_see::view_directory(&path) {
+        ExecutionPlan::ViewDirectory { path } => match xact_mesut::view_directory(path.clone()) {
             Ok(()) => ExecutionOutcome::Viewed { path, tool: "gls" },
             Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
         },
-        ExecutionPlan::ViewFile { path } => match xact_see::view_file(&path) {
+        ExecutionPlan::ViewFile { path } => match xact_mesut::view_file(path.clone()) {
             Ok(()) => ExecutionOutcome::Viewed { path, tool: "bat" },
             Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
         },

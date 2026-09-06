@@ -28,25 +28,22 @@
 //! `mesut-blocking`/`mesut-rayon`/`mesut-tokio` actually execute it instead
 //! of discarding it. That unblocks this phase honestly.
 //!
-//! [`run_process`] is the adapter for `£ RUN`: it wraps `xact-process`'s
-//! real process launch in a [`mesut::prelude::Work`] of
-//! [`mesut::prelude::WorkKind::Blocking`] (an inherited-stdio, wait-for-exit
-//! subprocess is exactly the "may stall a thread" work that kind exists
-//! for), submits it through a shared [`mesut::MesuT`] runtime, and reports
-//! back the same success/exit-code shape `xact-executor` already expects.
-//! `xact-process` still owns *how* to run a process (naive whitespace
-//! splitting, inherited stdio, no shell semantics); this crate only owns
-//! *handing that work to Mesut and getting the result back* — composition,
-//! not reimplementation (spec sections 3/12/13).
-//!
-//! `£ CREATE` (`xact-bank`) and `£ SEE` (`xact-see`) are not moved behind
-//! the adapter yet — they shell out via `.output()`/`.status()` today and
-//! are direct candidates for the same treatment, but Phase 2 as directed
-//! calls out "ordinary external-process execution" (i.e. `RUN`) first.
-//! Widening the adapter to cover them is natural follow-up work, not a
-//! blocked decision like Phase 1's finding was.
+//! [`run_process`], [`establish_path`], [`view_directory`], and
+//! [`view_file`] are the adapters for `£ RUN`, `£ CREATE`, and `£ SEE`
+//! respectively: each wraps a real external-tool call (`xact-process`,
+//! `xact-bank`, `xact-see`) in a [`mesut::prelude::Work`] of
+//! [`mesut::prelude::WorkKind::Blocking`] (a wait-for-exit subprocess —
+//! whether it's a naive `RUN`, `bank -p`, or inherited-stdio `gls`/`bat` —
+//! is exactly the "may stall a thread" work that kind exists for),
+//! submits it through a shared [`mesut::MesuT`] runtime via
+//! [`submit_blocking`], and reports back the real result. Those three
+//! crates still own *how* to run their respective tools (argv splitting,
+//! flag conventions, stdio inheritance); this crate only owns *handing
+//! that work to Mesut and getting the result back* — composition, not
+//! reimplementation (spec sections 3/12/13).
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use mesut::prelude::*;
@@ -105,24 +102,21 @@ fn shared_mesut() -> &'static MesuT {
     MESUT.get_or_init(runtime)
 }
 
-/// Runs `command_line` behind the Mesut adapter (`£ RUN`'s execution
-/// path): submits it as blocking [`Work`] to the shared Mesut runtime and
-/// waits for the real result. `xact-process` still does the actual
-/// launching; this function is the seam that hands that job to Mesut
-/// instead of running it inline.
-pub fn run_process(command_line: String) -> Result<ProcessOutcome, AdapterError> {
+/// Runs `job` as blocking [`Work`] on the shared Mesut runtime and waits
+/// for its real result. `job` runs on a Mesut blocking-executor worker
+/// thread, not inline — stdio inheritance and captured output both work
+/// the same regardless of which OS thread spawns the child process, so
+/// this is transparent to callers that shell out.
+fn submit_blocking<T: Send + 'static>(
+    label: &'static str,
+    job: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, AdapterError> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let work = Work::new(WorkKind::Blocking)
-        .with_label("xact.run")
+        .with_label(label)
         .with_job(move |_cancellation| {
-            let outcome = xact_process::run(&command_line)
-                .map(|status| ProcessOutcome {
-                    success: status.success(),
-                    code: status.code(),
-                })
-                .map_err(|err| err.to_string());
-            let _ = tx.send(outcome);
+            let _ = tx.send(job());
             Ok(Vec::new())
         });
 
@@ -133,6 +127,44 @@ pub fn run_process(command_line: String) -> Result<ProcessOutcome, AdapterError>
     rx.recv()
         .map_err(|_| AdapterError("Mesut completed the task without a result".into()))?
         .map_err(AdapterError)
+}
+
+/// Runs `command_line` behind the Mesut adapter (`£ RUN`'s execution
+/// path). `xact-process` still does the actual launching.
+pub fn run_process(command_line: String) -> Result<ProcessOutcome, AdapterError> {
+    submit_blocking("xact.run", move || {
+        xact_process::run(&command_line)
+            .map(|status| ProcessOutcome {
+                success: status.success(),
+                code: status.code(),
+            })
+            .map_err(|err| err.to_string())
+    })
+}
+
+/// Establishes `path` behind the Mesut adapter (`£ CREATE`'s execution
+/// path). `xact-bank` still owns `bank -p <path>` and its file/directory
+/// disambiguation.
+pub fn establish_path(path: PathBuf) -> Result<PathBuf, AdapterError> {
+    submit_blocking("xact.create", move || {
+        xact_bank::establish(&path).map_err(|err| err.to_string())
+    })
+}
+
+/// Shows a directory with `gls` behind the Mesut adapter (`£ SEE`'s
+/// directory routing).
+pub fn view_directory(path: PathBuf) -> Result<(), AdapterError> {
+    submit_blocking("xact.see.directory", move || {
+        xact_see::view_directory(&path).map_err(|err| err.to_string())
+    })
+}
+
+/// Shows a file with `bat` behind the Mesut adapter (`£ SEE`'s file
+/// routing).
+pub fn view_file(path: PathBuf) -> Result<(), AdapterError> {
+    submit_blocking("xact.see.file", move || {
+        xact_see::view_file(&path).map_err(|err| err.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -170,5 +202,25 @@ mod tests {
     fn run_process_reports_missing_binary_as_an_error() {
         let result = run_process("xact-definitely-not-a-real-binary".into());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn establish_path_actually_creates_the_path() {
+        let dir = std::env::temp_dir().join(format!("xact-mesut-create-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = dir.join("nested/dir/");
+
+        let result = establish_path(target.clone());
+
+        assert_eq!(result.expect("bank should succeed"), target);
+        assert!(dir.join("nested/dir").is_dir());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_directory_runs_gls_through_the_adapter() {
+        let result = view_directory(std::env::temp_dir());
+        assert!(result.is_ok(), "gls is expected to be installed and to succeed: {result:?}");
     }
 }

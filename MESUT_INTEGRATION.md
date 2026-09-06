@@ -7,18 +7,19 @@
 > a test). It is not wired into `xact-planner`/`xact-executor`/`xact-core`/`xact-cli` — no
 > behavioural change to the language, exactly as this directive's section 32 scopes Phase 1.
 >
-> **Phase 2 — done, for `£ RUN`.** Phase 1 found Mesut's executors were simulation stubs
-> (sleep-and-discard) with no way for `Work` to carry real executable content. Mesut has since
-> been extended (`2e94d38`, "Add real task execution, coordination scheduling, adaptive
-> scheduling, and observability"): `Work::with_job`/`with_future` now carry a real closure/future
-> that a compute, blocking, or async executor actually runs, returning a real result. `£ RUN`'s
-> execution now goes through `xact_mesut::run_process`, which submits the process launch as
-> `WorkKind::Blocking` work to a shared `MesuT` runtime and reports back the real exit status —
-> verified live (real stdout, real exit codes, real missing-binary errors) and by the full test
-> suite with zero regressions. `xact-process` still owns *how* to run a process (naive
-> whitespace-split argv, inherited stdio); `xact-mesut` only owns handing that job to Mesut and
-> getting the result back. `£ CREATE` (`xact-bank`) and `£ SEE` (`xact-see`) are not moved behind
-> the adapter yet — natural follow-up, not a blocked decision. See `crates/xact-mesut/src/lib.rs`
+> **Phase 2 — done.** Phase 1 found Mesut's executors were simulation stubs (sleep-and-discard)
+> with no way for `Work` to carry real executable content. Mesut has since been extended
+> (`2e94d38`, "Add real task execution, coordination scheduling, adaptive scheduling, and
+> observability"): `Work::with_job`/`with_future` now carry a real closure/future that a compute,
+> blocking, or async executor actually runs, returning a real result. `£ RUN`, `£ CREATE`, and
+> `£ SEE` all now execute through `xact-mesut`'s adapter (`run_process`, `establish_path`,
+> `view_directory`, `view_file`), each submitting its real external-tool call (`xact-process`'s
+> launch, `bank -p`, `gls`/`bat`) as `WorkKind::Blocking` work to a shared `MesuT` runtime and
+> reporting back the real result — verified live (real stdout/exit codes for `RUN`, a real file
+> created on disk for `CREATE`, `gls`'s real animated listing and `bat`'s real rendering reaching
+> the terminal for `SEE`) and by the full test suite with zero regressions. `xact-bank`/
+> `xact-see`/`xact-process` still own *how* each tool is invoked; `xact-executor` no longer calls
+> them directly — every plan variant goes through the adapter. See `crates/xact-mesut/src/lib.rs`
 > module docs for the full detail.
 
 ---

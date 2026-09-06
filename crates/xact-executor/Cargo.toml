@@ -6,6 +6,4 @@ license.workspace = true
 
 [dependencies]
 xact-planner = { workspace = true }
-xact-bank = { workspace = true }
-xact-see = { workspace = true }
 xact-mesut = { workspace = true }

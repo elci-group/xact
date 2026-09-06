@@ -7,4 +7,6 @@ license.workspace = true
 [dependencies]
 mesut = { workspace = true }
 xact-process = { workspace = true }
+xact-bank = { workspace = true }
+xact-see = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
