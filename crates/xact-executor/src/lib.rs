@@ -4,7 +4,10 @@
 //!
 //! Scope so far: [`ExecutionPlan::Bank`] dispatches to `xact-bank`,
 //! [`ExecutionPlan::ViewDirectory`]/[`ExecutionPlan::ViewFile`] dispatch to
-//! `xact-see`, and [`ExecutionPlan::Run`] dispatches to `xact-process`.
+//! `xact-see`, and [`ExecutionPlan::Run`] dispatches to `xact-mesut`'s
+//! execution adapter (Xact–Mesut Integration Phase 2 — see
+//! `MESUT_INTEGRATION.md`), which submits the real process launch as
+//! blocking work to a Mesut runtime instead of running it inline.
 //! Resource control (spec section 22) is not implemented — a run is not
 //! yet constrained by any `SPEND`/`SAVE` policy in effect.
 
@@ -44,14 +47,16 @@ pub fn execute(plan: ExecutionPlan) -> ExecutionOutcome {
             Ok(()) => ExecutionOutcome::Viewed { path, tool: "bat" },
             Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
         },
-        ExecutionPlan::Run { command_line } => match xact_process::run(&command_line) {
-            Ok(status) => ExecutionOutcome::RunCompleted {
-                command_line,
-                success: status.success(),
-                code: status.code(),
-            },
-            Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
-        },
+        ExecutionPlan::Run { command_line } => {
+            match xact_mesut::run_process(command_line.clone()) {
+                Ok(outcome) => ExecutionOutcome::RunCompleted {
+                    command_line,
+                    success: outcome.success,
+                    code: outcome.code,
+                },
+                Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+            }
+        }
     }
 }
 

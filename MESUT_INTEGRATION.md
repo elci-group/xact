@@ -7,17 +7,19 @@
 > a test). It is not wired into `xact-planner`/`xact-executor`/`xact-core`/`xact-cli` — no
 > behavioural change to the language, exactly as this directive's section 32 scopes Phase 1.
 >
-> **Phase 2 is blocked on a finding, not yet started.** As of Phase 1, Mesut's three executors
-> (`mesut-tokio`, `mesut-rayon`, `mesut-blocking`) do not execute real work: each `submit` spawns
-> a task that sleeps for a fixed duration (commented `// Simulate work execution` / `// Simulate
-> compute work` / `// Simulate blocking work` in Mesut's own source) and then drops the submitted
-> `Work`. `Work` has no closure/future/process-spec field — only an opaque `payload: Arc<Vec<u8>>`
-> — so there is currently no way to hand Mesut a real subprocess or closure and get a real result
-> back. This directive's Phase 2 ("move ordinary external-process execution behind the adapter")
-> would, if implemented as written today, replace Xact's currently-working `£ RUN`/`£
-> CREATE`/`£ SEE` execution with a no-op sleep. See `crates/xact-mesut/src/lib.rs` module docs for
-> the full detail. Proceeding needs a decision: extend Mesut with real work execution first, or
-> reshape what Phase 2 asks for.
+> **Phase 2 — done, for `£ RUN`.** Phase 1 found Mesut's executors were simulation stubs
+> (sleep-and-discard) with no way for `Work` to carry real executable content. Mesut has since
+> been extended (`2e94d38`, "Add real task execution, coordination scheduling, adaptive
+> scheduling, and observability"): `Work::with_job`/`with_future` now carry a real closure/future
+> that a compute, blocking, or async executor actually runs, returning a real result. `£ RUN`'s
+> execution now goes through `xact_mesut::run_process`, which submits the process launch as
+> `WorkKind::Blocking` work to a shared `MesuT` runtime and reports back the real exit status —
+> verified live (real stdout, real exit codes, real missing-binary errors) and by the full test
+> suite with zero regressions. `xact-process` still owns *how* to run a process (naive
+> whitespace-split argv, inherited stdio); `xact-mesut` only owns handing that job to Mesut and
+> getting the result back. `£ CREATE` (`xact-bank`) and `£ SEE` (`xact-see`) are not moved behind
+> the adapter yet — natural follow-up, not a blocked decision. See `crates/xact-mesut/src/lib.rs`
+> module docs for the full detail.
 
 ---
 
