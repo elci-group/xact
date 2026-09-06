@@ -60,6 +60,35 @@
 > ahead of Xact's own outcome line, and a genuine failure shows `failed: ...` from both layers in
 > agreement. Full test suite green, zero regressions. See `crates/xact-mesut/src/lib.rs` module
 > docs for the full detail.
+>
+> **Phase 5 — done.** Spec section 22: "`SPEND` and `SAVE` shall be actual execution constraints
+> ... enforced by the runtime/platform rather than merely displayed to the user. Linux
+> implementations should use appropriate kernel-native resource controls." Section 10: "the Xact
+> policy engine SHALL determine the semantic meaning of these policies... If Mesut cannot honour a
+> mandatory constraint, execution SHALL fail before the workload begins." New `xact-resource` crate
+> enforces `SPEND`/`SAVE` for real via Linux cgroup v2: `SPEND N%X` caps a `£ RUN` process at `N%`
+> of `X`; `SAVE N%X` reserves `N%` for the system, capping the workload at `100 - N`% (computed by
+> `xact-policy::PolicyContext::resource_budget`, matching this directive's "Xact policy engine
+> determines the semantic meaning" — CPU is a percentage of one core, RAM a percentage of total
+> system RAM). Enforcement uses a delegated systemd `user@<uid>.service` cgroup v2 subtree,
+> discovered by walking `/proc/self/cgroup` rather than assuming a UID-based path, with the child
+> process joined to its own dedicated cgroup via a `pre_exec` hook (before `exec`, so it's
+> constrained from its very first instruction) and the cgroup removed once the process exits.
+> Deliberately did **not** route the budget through `mesut::ResourceHint` — that field is Mesut's
+> own pre-execution size *estimate* for scheduling heuristics, not a cap any Mesut executor
+> enforces (confirmed by inspection: no cgroup/rlimit code exists anywhere in Mesut), and forcing a
+> hard percentage into an "estimated cycles" field would be a fabricated translation. Enforcement
+> is a property of how the OS process is spawned — owned end-to-end by
+> `xact-process`/`xact-resource` — orthogonal to which Mesut executor thread calls
+> `Command::spawn`. A resource name Xact can't enforce (anything but `CPU`/`RAM`) fails execution
+> outright before the workload begins, exactly as section 10 requires, rather than running
+> unconstrained. Verified as real, not just a file write nobody honours: a 300k-iteration shell
+> busy-loop took ~0.28s uncapped and ~7.1s under `! SPEND 10%CPU` through the full CLI pipeline —
+> genuine kernel throttling — plus a dedicated crate-level test proving a 10%-of-one-core cap
+> produces a >2x slowdown by design. Full test suite green (114 tests), zero regressions.
+> `£ CREATE`/`£ SEE` are not constrained by a resource budget yet — a scope decision (every
+> spec/directive example pairs `SPEND`/`SAVE` with `RUN`), not an oversight. See
+> `crates/xact-resource/src/lib.rs` module docs for the full detail.
 
 ---
 

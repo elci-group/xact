@@ -92,6 +92,23 @@
 //! that matters, because the authoritative outcome still comes from
 //! `join`/`try_join`. `xact-cli` is the only caller that actually prints
 //! these, and only for `! CONCURRENTLY` branches — see its module docs.
+//!
+//! # Phase 5 (this crate, now)
+//!
+//! Directive section 32's Phase 5: "Translate Xact resource policies into
+//! Mesut execution constraints." [`run_process`]/[`run_process_async`]
+//! now take a `xact_ast::ResourceBudget` and pass it straight to
+//! `xact_process::run`, which enforces it via `xact-resource`'s real
+//! cgroup v2 mechanism before spawning — see that crate for how. This
+//! deliberately does *not* route the budget through `mesut::ResourceHint`:
+//! that field is Mesut's own pre-execution size *estimate*, used for
+//! scheduling heuristics, not a cap any Mesut executor enforces (Mesut has
+//! no resource-enforcement mechanism at all, confirmed by inspection —
+//! forcing a hard percentage into an "estimated cycles" field would be a
+//! fabricated translation, not a real one). Enforcement is a property of
+//! how the OS process is spawned, owned end-to-end by
+//! `xact-process`/`xact-resource`, orthogonal to which Mesut executor
+//! thread happens to call `Command::spawn`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -311,17 +328,22 @@ fn submit<T: Send + 'static>(
 }
 
 /// Runs `command_line` behind the Mesut adapter (`£ RUN`'s execution
-/// path). `xact-process` still does the actual launching.
-pub fn run_process(command_line: String) -> Result<ProcessOutcome, AdapterError> {
-    run_process_async(command_line)?.join()
+/// path), constrained by `budget` (spec section 22, Xact–Mesut
+/// Integration Phase 5). `xact-process` still does the actual launching
+/// and, via `xact-resource`, the actual enforcement.
+pub fn run_process(command_line: String, budget: xact_ast::ResourceBudget) -> Result<ProcessOutcome, AdapterError> {
+    run_process_async(command_line, budget)?.join()
 }
 
 /// Same as [`run_process`], but returns immediately as an independent
 /// branch (`£ RUN` under `! CONCURRENTLY`) instead of waiting for the
 /// process to exit.
-pub fn run_process_async(command_line: String) -> Result<PendingTask<ProcessOutcome>, AdapterError> {
+pub fn run_process_async(
+    command_line: String,
+    budget: xact_ast::ResourceBudget,
+) -> Result<PendingTask<ProcessOutcome>, AdapterError> {
     submit("xact.run", move || {
-        xact_process::run(&command_line)
+        xact_process::run(&command_line, &budget)
             .map(|status| ProcessOutcome {
                 success: status.success(),
                 code: status.code(),
@@ -394,20 +416,33 @@ mod tests {
 
     #[test]
     fn run_process_reports_success() {
-        let outcome = run_process("true".into()).expect("true should launch");
+        let outcome = run_process("true".into(), xact_ast::ResourceBudget::default()).expect("true should launch");
         assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0) });
     }
 
     #[test]
     fn run_process_reports_nonzero_exit_not_an_error() {
-        let outcome = run_process("false".into()).expect("false should launch");
+        let outcome = run_process("false".into(), xact_ast::ResourceBudget::default()).expect("false should launch");
         assert_eq!(outcome, ProcessOutcome { success: false, code: Some(1) });
     }
 
     #[test]
     fn run_process_reports_missing_binary_as_an_error() {
-        let result = run_process("xact-definitely-not-a-real-binary".into());
+        let result = run_process("xact-definitely-not-a-real-binary".into(), xact_ast::ResourceBudget::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_process_applies_a_real_resource_budget() {
+        let budget = xact_ast::ResourceBudget { cpu_percent: Some(50), ..Default::default() };
+        let outcome = run_process("true".into(), budget).expect("true should launch under a real cgroup cap");
+        assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0) });
+    }
+
+    #[test]
+    fn run_process_fails_before_launching_for_an_unenforceable_resource() {
+        let budget = xact_ast::ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
+        assert!(run_process("true".into(), budget).is_err());
     }
 
     #[test]
@@ -440,7 +475,7 @@ mod tests {
         let start = std::time::Instant::now();
 
         let branches: Vec<_> = (0..3)
-            .map(|_| run_process_async("sleep 1".into()).expect("submission should be admitted"))
+            .map(|_| run_process_async("sleep 1".into(), xact_ast::ResourceBudget::default()).expect("submission should be admitted"))
             .collect();
 
         for branch in branches {
@@ -457,7 +492,7 @@ mod tests {
 
     #[test]
     fn try_join_reports_none_while_still_running_then_some_once_done() {
-        let mut branch = run_process_async("sleep 1".into()).expect("submission should be admitted");
+        let mut branch = run_process_async("sleep 1".into(), xact_ast::ResourceBudget::default()).expect("submission should be admitted");
 
         assert!(branch.try_join().is_none(), "should still be running immediately after submission");
 
@@ -470,7 +505,7 @@ mod tests {
     /// one terminal event (`Completed` here, since `true` succeeds).
     #[test]
     fn drain_events_reports_real_lifecycle_including_a_terminal_event() {
-        let mut branch = run_process_async("true".into()).expect("submission should be admitted");
+        let mut branch = run_process_async("true".into(), xact_ast::ResourceBudget::default()).expect("submission should be admitted");
 
         // The result (via try_join) and the terminal lifecycle event are
         // delivered through independent channels and can arrive in either

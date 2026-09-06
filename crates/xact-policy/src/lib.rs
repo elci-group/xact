@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use xact_ast::{PolicyArgs, PolicyOperator, PolicyStatement, ResourceQuota};
+use xact_ast::{PolicyArgs, PolicyOperator, PolicyStatement, ResourceBudget, ResourceQuota};
 use xact_diagnostics::Diagnostic;
 
 #[derive(Debug, Clone, Default)]
@@ -44,6 +44,39 @@ impl PolicyContext {
 
     pub fn quotas(&self) -> &[(PolicyOperator, ResourceQuota)] {
         &self.quotas
+    }
+
+    /// Resolves the session's accumulated `SPEND`/`SAVE` statements into
+    /// the actual cap `xact-resource` should enforce (spec section 22,
+    /// Xact–Mesut Integration Phase 5 — "the Xact policy engine SHALL
+    /// determine the semantic meaning of these policies"): `SPEND N%X`
+    /// caps the workload at `N%`; `SAVE N%X` reserves `N%` for the system,
+    /// capping the workload at `100 - N`%. Percentages are already known
+    /// to be in `1..=100` (validated in `apply`), so `100 - N` never
+    /// underflows. Later statements for the same resource win, matching
+    /// `CONCURRENTLY`/`CONSECUTIVELY`'s "restating is fine" precedent —
+    /// `apply` already rejects a same-resource SPEND/SAVE *conflict*, so
+    /// this only ever resolves repeated agreement, never a contradiction.
+    pub fn resource_budget(&self) -> ResourceBudget {
+        let mut budget = ResourceBudget::default();
+        for (operator, quota) in &self.quotas {
+            let cap = match operator {
+                PolicyOperator::Spend => quota.percent,
+                PolicyOperator::Save => 100 - quota.percent,
+                _ => unreachable!("only SPEND/SAVE quotas are ever pushed into `quotas`"),
+            };
+            match quota.resource.to_uppercase().as_str() {
+                "CPU" => budget.cpu_percent = Some(cap),
+                "RAM" => budget.ram_percent = Some(cap),
+                other => {
+                    let name = other.to_string();
+                    if !budget.unenforceable.contains(&name) {
+                        budget.unenforceable.push(name);
+                    }
+                }
+            }
+        }
+        budget
     }
 
     /// Removes already-established singleton operators from a completion
@@ -128,6 +161,18 @@ pub fn apply(stmt: PolicyStatement, context: &mut PolicyContext) -> Result<Polic
                 unreachable!("parser guarantees SPEND/SAVE carries Quotas args")
             };
             for quota in quotas {
+                if !(1..=100).contains(&quota.percent) {
+                    return Err(Diagnostic::invalid(
+                        format!(
+                            "{} {}%{} is not a valid percentage — must be between 1 and 100.",
+                            stmt.operator.as_str(),
+                            quota.percent,
+                            quota.resource
+                        ),
+                        quota.span,
+                        vec![],
+                    ));
+                }
                 if let Some(&owner) = context.quota_owner.get(&quota.resource) {
                     if owner != stmt.operator {
                         return Err(Diagnostic::invalid(
@@ -310,5 +355,50 @@ mod tests {
         apply(schedule(PolicyOperator::Concurrently), &mut ctx).unwrap();
         let filtered = ctx.filter_suggestions(vec!["CONCURRENTLY".into(), "CONSECUTIVELY".into(), "WITH".into()]);
         assert_eq!(filtered, vec!["WITH".to_string()]);
+    }
+
+    #[test]
+    fn spend_out_of_range_percent_rejected() {
+        let mut ctx = PolicyContext::new();
+        assert!(apply(quotas(PolicyOperator::Spend, &[(0, "CPU")]), &mut ctx).is_err());
+        assert!(apply(quotas(PolicyOperator::Spend, &[(101, "CPU")]), &mut ctx).is_err());
+        assert!(apply(quotas(PolicyOperator::Spend, &[(150, "CPU")]), &mut ctx).is_err());
+    }
+
+    #[test]
+    fn save_out_of_range_percent_rejected() {
+        let mut ctx = PolicyContext::new();
+        assert!(apply(quotas(PolicyOperator::Save, &[(0, "RAM")]), &mut ctx).is_err());
+        assert!(apply(quotas(PolicyOperator::Save, &[(200, "RAM")]), &mut ctx).is_err());
+    }
+
+    #[test]
+    fn resource_budget_translates_spend_directly_and_save_as_the_complement() {
+        let mut ctx = PolicyContext::new();
+        apply(quotas(PolicyOperator::Spend, &[(40, "CPU")]), &mut ctx).unwrap();
+        apply(quotas(PolicyOperator::Save, &[(10, "RAM")]), &mut ctx).unwrap();
+
+        let budget = ctx.resource_budget();
+
+        assert_eq!(budget.cpu_percent, Some(40));
+        assert_eq!(budget.ram_percent, Some(90));
+        assert!(budget.unenforceable.is_empty());
+    }
+
+    #[test]
+    fn resource_budget_reports_unrecognized_resources_instead_of_dropping_them() {
+        let mut ctx = PolicyContext::new();
+        apply(quotas(PolicyOperator::Spend, &[(50, "GPU")]), &mut ctx).unwrap();
+
+        let budget = ctx.resource_budget();
+
+        assert_eq!(budget.cpu_percent, None);
+        assert_eq!(budget.unenforceable, vec!["GPU".to_string()]);
+    }
+
+    #[test]
+    fn resource_budget_is_empty_with_no_quotas_stated() {
+        let ctx = PolicyContext::new();
+        assert!(ctx.resource_budget().is_empty());
     }
 }

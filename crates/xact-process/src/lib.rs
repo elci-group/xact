@@ -3,13 +3,13 @@
 //!
 //! Scope so far: launches a program with inherited stdio and waits for it
 //! to exit (foreground, blocking) — the simplest, most predictable "shell
-//! 101" behavior, and the natural default to pair with `! SAVE`/`! WITH`
-//! policy on a single command before there is a real scheduler to honor
-//! `CONCURRENTLY`/backgrounding. Resource control (spec section 22 —
-//! `SPEND`/`SAVE` as real kernel-native constraints) and supervision of
-//! multiple concurrent/consecutive processes (section 23) are not
-//! implemented yet; this crate only runs one process and reports how it
-//! exited.
+//! 101" behavior. Resource control (spec section 22 — `SPEND`/`SAVE` as
+//! real kernel-native constraints, Xact–Mesut Integration Phase 5) is
+//! real: `run` applies whatever [`ResourceBudget`] it's given via
+//! `xact-resource` before spawning — see that crate for the actual cgroup
+//! v2 mechanism. Supervision of multiple concurrent/consecutive processes
+//! (section 23) lives in `xact-mesut`/`xact-executor`, not here; this
+//! crate only runs one process and reports how it exited.
 //!
 //! `RUN`'s grammar (spec section 7) gives it a single string operand, with
 //! no argument-list syntax — `£ RUN 'chrome'`. To still be useful for
@@ -24,6 +24,8 @@
 use std::fmt;
 use std::process::{Command, ExitStatus};
 
+use xact_ast::ResourceBudget;
+
 #[derive(Debug)]
 pub struct ProcessError(String);
 
@@ -36,18 +38,26 @@ impl fmt::Display for ProcessError {
 impl std::error::Error for ProcessError {}
 
 /// Runs `command_line`, naively whitespace-split into a program and its
-/// arguments, with inherited stdio, and waits for it to exit.
-pub fn run(command_line: &str) -> Result<ExitStatus, ProcessError> {
+/// arguments, with inherited stdio, and waits for it to exit. `budget`
+/// (a session's currently-established `SPEND`/`SAVE` policy, or
+/// [`ResourceBudget::default`] for none) is applied via `xact-resource`
+/// before the process is spawned — a nonempty budget that can't actually
+/// be enforced fails the call outright, before anything runs, rather than
+/// launching unconstrained.
+pub fn run(command_line: &str, budget: &ResourceBudget) -> Result<ExitStatus, ProcessError> {
     let mut parts = command_line.split_whitespace();
     let Some(program) = parts.next() else {
         return Err(ProcessError("RUN was given an empty command.".into()));
     };
     let args: Vec<&str> = parts.collect();
 
-    Command::new(program)
-        .args(&args)
-        .status()
-        .map_err(|e| ProcessError(format!("failed to run '{program}': {e}")))
+    let mut command = Command::new(program);
+    command.args(&args);
+
+    let _guard = xact_resource::apply(&mut command, budget)
+        .map_err(|err| ProcessError(format!("cannot honour the active resource policy: {err}")))?;
+
+    command.status().map_err(|e| ProcessError(format!("failed to run '{program}': {e}")))
 }
 
 #[cfg(test)]
@@ -56,13 +66,13 @@ mod tests {
 
     #[test]
     fn successful_command_reports_success() {
-        let status = run("true").expect("true should launch");
+        let status = run("true", &ResourceBudget::default()).expect("true should launch");
         assert!(status.success());
     }
 
     #[test]
     fn failing_command_reports_failure_not_an_error() {
-        let status = run("false").expect("false should launch");
+        let status = run("false", &ResourceBudget::default()).expect("false should launch");
         assert!(!status.success());
     }
 
@@ -71,7 +81,7 @@ mod tests {
         // "sh -c true" splits into program="sh", args=["-c", "true"] — sh
         // runs the command `true`, exit 0. This only succeeds if both
         // words after the program name reached sh as separate argv entries.
-        let status = run("sh -c true").expect("sh should launch");
+        let status = run("sh -c true", &ResourceBudget::default()).expect("sh should launch");
         assert!(status.success());
     }
 
@@ -81,17 +91,30 @@ mod tests {
         // entries instead of staying together: sh receives `"exit` and
         // `3"` as two broken tokens rather than the single script
         // `exit 3`, and fails — the documented "no quoting" limitation.
-        let status = run("sh -c \"exit 3\"").expect("sh should launch");
+        let status = run("sh -c \"exit 3\"", &ResourceBudget::default()).expect("sh should launch");
         assert!(!status.success());
     }
 
     #[test]
     fn missing_program_is_an_error_not_a_panic() {
-        assert!(run("xact-definitely-not-a-real-binary").is_err());
+        assert!(run("xact-definitely-not-a-real-binary", &ResourceBudget::default()).is_err());
     }
 
     #[test]
     fn empty_command_is_an_error() {
-        assert!(run("   ").is_err());
+        assert!(run("   ", &ResourceBudget::default()).is_err());
+    }
+
+    #[test]
+    fn a_real_resource_budget_actually_caps_the_process() {
+        let budget = ResourceBudget { cpu_percent: Some(40), ..Default::default() };
+        let status = run("true", &budget).expect("true should launch under a real cgroup cap");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn an_unenforceable_resource_fails_before_launching() {
+        let budget = ResourceBudget { unenforceable: vec!["GPU".to_string()], ..Default::default() };
+        assert!(run("true", &budget).is_err());
     }
 }

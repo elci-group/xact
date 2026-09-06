@@ -100,6 +100,15 @@ impl Session {
     pub fn schedule(&self) -> Option<PolicyOperator> {
         self.policy.schedule()
     }
+
+    /// This session's established resource budget (spec section 22,
+    /// Xact–Mesut Integration Phase 5), resolved from accumulated
+    /// `SPEND`/`SAVE` statements — a caller passes this to
+    /// `xact-executor::execute`/`execute_concurrent` so a `£ RUN` plan is
+    /// actually constrained, not just described.
+    pub fn resource_budget(&self) -> xact_ast::ResourceBudget {
+        self.policy.resource_budget()
+    }
 }
 
 #[cfg(test)]

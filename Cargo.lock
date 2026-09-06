@@ -740,6 +740,7 @@ dependencies = [
 name = "xact-executor"
 version = "0.1.0"
 dependencies = [
+ "xact-ast",
  "xact-mesut",
  "xact-planner",
 ]
@@ -758,6 +759,7 @@ dependencies = [
  "mesut",
  "mesut-observe",
  "tokio",
+ "xact-ast",
  "xact-bank",
  "xact-process",
  "xact-see",
@@ -791,6 +793,10 @@ dependencies = [
 [[package]]
 name = "xact-process"
 version = "0.1.0"
+dependencies = [
+ "xact-ast",
+ "xact-resource",
+]
 
 [[package]]
 name = "xact-reference"
@@ -802,6 +808,10 @@ dependencies = [
 [[package]]
 name = "xact-resource"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "xact-ast",
+]
 
 [[package]]
 name = "xact-see"

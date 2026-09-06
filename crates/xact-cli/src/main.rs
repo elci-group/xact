@@ -30,6 +30,14 @@
 //! execution-oriented telemetry, distinct from — and printed separately
 //! from — Xact's own semantic outcome line for that same branch.
 //!
+//! Resource policy (spec section 22, Xact–Mesut Integration Phase 5):
+//! `session.resource_budget()` resolves the session's accumulated
+//! `SPEND`/`SAVE` statements and is passed to every `execute`/
+//! `execute_concurrent` call — currently only `£ RUN` is actually
+//! constrained by it (real Linux cgroup v2 enforcement, via
+//! `xact-resource`), so a `£ RUN` under an active budget that names an
+//! unenforceable resource fails outright rather than running unconstrained.
+//!
 //! `@` blocks may be typed across several lines for readability (matching
 //! spec section 9's example layout): once a line starts with `@`, the REPL
 //! keeps reading continuation lines until a blank line, then submits the
@@ -193,8 +201,9 @@ fn main() {
                 println!("accepted: {description}");
                 match xact_planner::plan(&command, session.references()) {
                     PlanOutcome::Plan(plan) => {
+                        let budget = session.resource_budget();
                         if session.schedule() == Some(PolicyOperator::Concurrently) {
-                            match xact_executor::execute_concurrent(plan) {
+                            match xact_executor::execute_concurrent(plan, budget) {
                                 Ok(branch) => {
                                     println!("  queued as an independent branch ({} in flight)", pending.len() + 1);
                                     pending.push((description, branch));
@@ -202,7 +211,7 @@ fn main() {
                                 Err(outcome) => print_outcome(None, &outcome),
                             }
                         } else {
-                            print_outcome(None, &xact_executor::execute(plan));
+                            print_outcome(None, &xact_executor::execute(plan, budget));
                         }
                     }
                     PlanOutcome::Unsupported(reason) => println!("  {reason}"),
@@ -210,7 +219,11 @@ fn main() {
             }
             SessionOutcome::PolicyAccepted(stmt) => {
                 println!("policy set: {}", describe_policy(&stmt));
-                if !matches!(stmt.operator, PolicyOperator::Concurrently | PolicyOperator::Consecutively) {
+                let already_enforced = matches!(
+                    stmt.operator,
+                    PolicyOperator::Concurrently | PolicyOperator::Consecutively | PolicyOperator::Spend | PolicyOperator::Save
+                );
+                if !already_enforced {
                     println!("  (not yet enforced — the planner/executor are not implemented yet.)");
                 }
             }

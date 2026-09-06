@@ -25,9 +25,19 @@
 //! lifecycle telemetry for a branch (Xact–Mesut Integration Phase 4) —
 //! non-blocking and best-effort, separate from the authoritative outcome
 //! `join`/`try_join` report (spec section 19).
+//!
+//! [`execute`]/[`execute_concurrent`] both take a `ResourceBudget` (spec
+//! section 22, Xact–Mesut Integration Phase 5) and apply it only to
+//! `ExecutionPlan::Run` — `xact-process` (via `xact-resource`'s real
+//! cgroup v2 enforcement) is what actually constrains it.
+//! `Bank`/`ViewDirectory`/`ViewFile` ignore the budget for now: `bank`/
+//! `gls`/`bat` are typically short-lived, and every spec/directive
+//! example of `SPEND`/`SAVE` pairs it with `RUN` — widening enforcement
+//! to those is a scope decision to make later, not an oversight here.
 
 use std::path::PathBuf;
 
+use xact_ast::ResourceBudget;
 use xact_planner::ExecutionPlan;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +58,7 @@ pub enum ExecutionOutcome {
     Failed { message: String },
 }
 
-pub fn execute(plan: ExecutionPlan) -> ExecutionOutcome {
+pub fn execute(plan: ExecutionPlan, budget: ResourceBudget) -> ExecutionOutcome {
     match plan {
         ExecutionPlan::Bank { path } => bank_outcome(xact_mesut::establish_path(path)),
         ExecutionPlan::ViewDirectory { path } => {
@@ -56,7 +66,7 @@ pub fn execute(plan: ExecutionPlan) -> ExecutionOutcome {
         }
         ExecutionPlan::ViewFile { path } => view_outcome(path.clone(), "bat", xact_mesut::view_file(path)),
         ExecutionPlan::Run { command_line } => {
-            run_outcome(command_line.clone(), xact_mesut::run_process(command_line))
+            run_outcome(command_line.clone(), xact_mesut::run_process(command_line, budget))
         }
     }
 }
@@ -64,10 +74,11 @@ pub fn execute(plan: ExecutionPlan) -> ExecutionOutcome {
 /// Admits `plan` onto Mesut as an independent branch and returns
 /// immediately (`! CONCURRENTLY`'s execution path — see the module
 /// docs). `Err` means Mesut rejected the submission itself (e.g. no
-/// executor available); a genuinely running branch is always `Ok`, and
-/// its eventual success/failure is only known once [`Pending::join`] or
+/// executor available, or `budget` names a resource Xact can't enforce);
+/// a genuinely running branch is always `Ok`, and its eventual
+/// success/failure is only known once [`Pending::join`] or
 /// [`Pending::try_join`] reports it.
-pub fn execute_concurrent(plan: ExecutionPlan) -> Result<Pending, ExecutionOutcome> {
+pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result<Pending, ExecutionOutcome> {
     let submission_failed = |err: xact_mesut::AdapterError| ExecutionOutcome::Failed { message: err.to_string() };
 
     match plan {
@@ -80,7 +91,7 @@ pub fn execute_concurrent(plan: ExecutionPlan) -> Result<Pending, ExecutionOutco
         ExecutionPlan::ViewFile { path } => xact_mesut::view_file_async(path.clone())
             .map(|task| Pending(PendingKind::View { path, tool: "bat", task }))
             .map_err(submission_failed),
-        ExecutionPlan::Run { command_line } => xact_mesut::run_process_async(command_line.clone())
+        ExecutionPlan::Run { command_line } => xact_mesut::run_process_async(command_line.clone(), budget)
             .map(|task| Pending(PendingKind::Run { command_line, task }))
             .map_err(submission_failed),
     }
@@ -181,7 +192,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let target = dir.join("nested/dir/");
 
-        let outcome = execute(ExecutionPlan::Bank { path: target.clone() });
+        let outcome = execute(ExecutionPlan::Bank { path: target.clone() }, ResourceBudget::default());
 
         assert_eq!(outcome, ExecutionOutcome::BankEstablished { path: target.clone() });
         assert!(dir.join("nested/dir").is_dir());
@@ -191,9 +202,10 @@ mod tests {
 
     #[test]
     fn view_directory_plan_runs_gls() {
-        let outcome = execute(ExecutionPlan::ViewDirectory {
-            path: std::env::temp_dir(),
-        });
+        let outcome = execute(
+            ExecutionPlan::ViewDirectory { path: std::env::temp_dir() },
+            ResourceBudget::default(),
+        );
         assert_eq!(
             outcome,
             ExecutionOutcome::Viewed {
@@ -205,9 +217,10 @@ mod tests {
 
     #[test]
     fn run_plan_reports_success() {
-        let outcome = execute(ExecutionPlan::Run {
-            command_line: "true".into(),
-        });
+        let outcome = execute(
+            ExecutionPlan::Run { command_line: "true".into() },
+            ResourceBudget::default(),
+        );
         assert_eq!(
             outcome,
             ExecutionOutcome::RunCompleted {
@@ -220,9 +233,10 @@ mod tests {
 
     #[test]
     fn run_plan_reports_nonzero_exit_as_completed_not_failed() {
-        let outcome = execute(ExecutionPlan::Run {
-            command_line: "false".into(),
-        });
+        let outcome = execute(
+            ExecutionPlan::Run { command_line: "false".into() },
+            ResourceBudget::default(),
+        );
         assert_eq!(
             outcome,
             ExecutionOutcome::RunCompleted {
@@ -235,9 +249,27 @@ mod tests {
 
     #[test]
     fn run_plan_reports_missing_binary_as_failed() {
-        let outcome = execute(ExecutionPlan::Run {
-            command_line: "xact-definitely-not-a-real-binary".into(),
-        });
+        let outcome = execute(
+            ExecutionPlan::Run { command_line: "xact-definitely-not-a-real-binary".into() },
+            ResourceBudget::default(),
+        );
+        assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
+    }
+
+    #[test]
+    fn run_plan_under_a_resource_budget_is_still_constrained_for_real() {
+        let budget = ResourceBudget { cpu_percent: Some(50), ..Default::default() };
+        let outcome = execute(ExecutionPlan::Run { command_line: "true".into() }, budget);
+        assert_eq!(
+            outcome,
+            ExecutionOutcome::RunCompleted { command_line: "true".into(), success: true, code: Some(0) }
+        );
+    }
+
+    #[test]
+    fn run_plan_fails_before_launching_for_an_unenforceable_resource() {
+        let budget = ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
+        let outcome = execute(ExecutionPlan::Run { command_line: "true".into() }, budget);
         assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
     }
 
@@ -247,7 +279,7 @@ mod tests {
 
         let branches: Vec<Pending> = (0..3)
             .map(|_| {
-                execute_concurrent(ExecutionPlan::Run { command_line: "sleep 1".into() })
+                execute_concurrent(ExecutionPlan::Run { command_line: "sleep 1".into() }, ResourceBudget::default())
                     .unwrap_or_else(|outcome| panic!("submission should be admitted: {outcome:?}"))
             })
             .collect();
@@ -276,7 +308,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let target = dir.join("nested/dir/");
 
-        let mut branch = execute_concurrent(ExecutionPlan::Bank { path: target.clone() })
+        let mut branch = execute_concurrent(ExecutionPlan::Bank { path: target.clone() }, ResourceBudget::default())
             .unwrap_or_else(|outcome| panic!("submission should be admitted: {outcome:?}"));
 
         let outcome = loop {

@@ -302,6 +302,40 @@ pub struct ResourceQuota {
     pub span: Span,
 }
 
+/// The effective resource constraint a session's accumulated `SPEND`/
+/// `SAVE` statements resolve to (spec section 22; Xact–Mesut Integration
+/// Phase 5): `SPEND N%X` caps the workload at `N%` of `X`; `SAVE N%X`
+/// reserves `N%` of `X` for the rest of the system, i.e. caps the workload
+/// at `(100 - N)%`. `xact-policy` computes this; `xact-resource` is the
+/// only crate that enforces it. A default `ResourceBudget` (`None`/`None`/
+/// empty) means no constraint is in effect — execution is unconstrained,
+/// exactly today's pre-Phase-5 behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceBudget {
+    /// Cap as a percentage of one CPU core (cgroup v2's own native unit —
+    /// `100` means one full core, `400` would mean four, though nothing
+    /// here produces a value above `100` since a single `SPEND`/`SAVE`
+    /// percent is grammatically capped at that range).
+    pub cpu_percent: Option<u32>,
+    /// Cap as a percentage of total system RAM.
+    pub ram_percent: Option<u32>,
+    /// Resource names present in the session's policy that Xact has no
+    /// enforcement mechanism for yet (anything but `CPU`/`RAM`). Never
+    /// silently dropped: a non-empty list here means Xact–Mesut
+    /// Integration section 10's rule applies — "execution SHALL fail
+    /// before the workload begins" — rather than running unconstrained
+    /// while pretending the stated policy was honoured.
+    pub unenforceable: Vec<String>,
+}
+
+impl ResourceBudget {
+    /// No constraint at all — nothing stated, or everything named was
+    /// already accounted for as CPU/RAM.
+    pub fn is_empty(&self) -> bool {
+        self.cpu_percent.is_none() && self.ram_percent.is_none() && self.unenforceable.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyArgs {
     None,
