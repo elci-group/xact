@@ -11,3 +11,5 @@ path = "src/main.rs"
 [dependencies]
 xact-ast = { workspace = true }
 xact-core = { workspace = true }
+xact-planner = { workspace = true }
+xact-executor = { workspace = true }

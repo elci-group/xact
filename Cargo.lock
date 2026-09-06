@@ -30,6 +30,8 @@ version = "0.1.0"
 dependencies = [
  "xact-ast",
  "xact-core",
+ "xact-executor",
+ "xact-planner",
 ]
 
 [[package]]
@@ -63,6 +65,10 @@ dependencies = [
 [[package]]
 name = "xact-executor"
 version = "0.1.0"
+dependencies = [
+ "xact-bank",
+ "xact-planner",
+]
 
 [[package]]
 name = "xact-lexer"
@@ -83,6 +89,10 @@ dependencies = [
 [[package]]
 name = "xact-planner"
 version = "0.1.0"
+dependencies = [
+ "xact-ast",
+ "xact-reference",
+]
 
 [[package]]
 name = "xact-policy"

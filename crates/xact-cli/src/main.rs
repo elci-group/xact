@@ -1,7 +1,12 @@
 //! Minimal REPL: type a `£` command, a `!` policy statement, or an `@`
 //! agent block, get grammatical + semantic validation and a diagnostic if
-//! it fails. There is no execution yet — that needs `xact-planner`/
-//! `xact-executor`, which are still stubs.
+//! it fails.
+//!
+//! Once a command is accepted, the CLI plans it (`xact-planner`) and, if a
+//! plan exists, actually runs it (`xact-executor`) — so far that's only
+//! `£ BANK ...`, which really does create the file or directory via the
+//! real `bank` binary. Every other verb reports itself unsupported rather
+//! than silently doing nothing.
 //!
 //! `@` blocks may be typed across several lines for readability (matching
 //! spec section 9's example layout): once a line starts with `@`, the REPL
@@ -14,9 +19,11 @@ use std::io::{self, Write};
 
 use xact_ast::{AgentBlock, AgentClause, Command, Operand, PolicyArgs, PolicyStatement};
 use xact_core::{Session, SessionOutcome};
+use xact_executor::ExecutionOutcome;
+use xact_planner::PlanOutcome;
 
 fn main() {
-    println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; no execution yet");
+    println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; BANK actually runs");
     println!("Type a £ command, a ! policy statement, an @ agent block, or 'exit'.");
 
     let mut session = Session::new();
@@ -62,7 +69,17 @@ fn main() {
         match session.submit(&input) {
             SessionOutcome::Accepted(command) => {
                 println!("accepted: {}", describe(&command));
-                println!("  (planning/execution are not implemented yet.)");
+                match xact_planner::plan(&command, session.references()) {
+                    PlanOutcome::Plan(plan) => match xact_executor::execute(plan) {
+                        ExecutionOutcome::BankEstablished { path } => {
+                            println!("  bank: established {}", path.display());
+                        }
+                        ExecutionOutcome::Failed { message } => {
+                            println!("  execution failed: {message}");
+                        }
+                    },
+                    PlanOutcome::Unsupported(reason) => println!("  {reason}"),
+                }
             }
             SessionOutcome::PolicyAccepted(stmt) => {
                 println!("policy set: {}", describe_policy(&stmt));

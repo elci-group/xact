@@ -1,12 +1,13 @@
 //! Session state that ties the deterministic pipeline together:
 //! lex -> parse -> semantic/policy validation -> reference/identity/policy update.
 //!
-//! `xact-core` deliberately stops at *validation*, not execution. Turning a
-//! [`xact_ast::Command`] into an [`ExecutionPlan`](https://) and running it
-//! is the job of `xact-planner`/`xact-executor` in a later phase (spec
-//! sections 20-21); those crates are still stubs. `SessionOutcome::Accepted`
-//! therefore means "grammatically and semantically valid, ready to plan",
-//! not "ran".
+//! `xact-core` deliberately stops at *validation*, not execution.
+//! `SessionOutcome::Accepted` means "grammatically and semantically valid,
+//! ready to plan" — turning that into an `ExecutionPlan` and running it is
+//! `xact-planner`/`xact-executor`'s job (spec sections 20-21), which a
+//! caller invokes separately using [`Session::references`] (see
+//! `xact-cli` for the reference wiring). Only `BANK` has a real plan so
+//! far; every other verb reports itself unsupported rather than executing.
 
 use xact_agent::ValidatedAgentBlock;
 use xact_ast::{AgentBlock, Command, Line, PolicyStatement};
@@ -81,6 +82,13 @@ impl Session {
     /// singleton-established in this session (spec section 16).
     pub fn complete(&self, input: &str) -> Vec<String> {
         self.policy.filter_suggestions(xact_completion::complete(input))
+    }
+
+    /// This session's resolved-reference state, for a caller that wants to
+    /// plan and execute an [`SessionOutcome::Accepted`] command (spec
+    /// sections 20-21) — `xact-core` itself never plans or executes.
+    pub fn references(&self) -> &ReferenceContext {
+        &self.references
     }
 }
 

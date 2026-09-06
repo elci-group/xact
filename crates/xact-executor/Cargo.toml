@@ -3,3 +3,7 @@ name = "xact-executor"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+
+[dependencies]
+xact-planner = { workspace = true }
+xact-bank = { workspace = true }
