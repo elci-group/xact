@@ -704,6 +704,7 @@ dependencies = [
  "xact-ast",
  "xact-core",
  "xact-executor",
+ "xact-mesut",
  "xact-planner",
 ]
 
@@ -755,6 +756,7 @@ name = "xact-mesut"
 version = "0.1.0"
 dependencies = [
  "mesut",
+ "mesut-observe",
  "tokio",
  "xact-bank",
  "xact-process",

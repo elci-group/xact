@@ -37,6 +37,29 @@
 > — genuine parallelism on Mesut's blocking-executor thread pool (`mesut-blocking`'s
 > `num_cpus::get().max(2)` real OS threads), not simulated. Full test suite green, zero
 > regressions. See `crates/xact-mesut/src/lib.rs` module docs for the full detail.
+>
+> **Phase 4 — done.** Section 20: "Xact's live interface SHALL consume Mesut lifecycle events";
+> section 19 draws the line kept here: "Xact's user-facing diagnostic model SHALL remain
+> semantic. Mesut's telemetry SHALL remain execution-oriented... Xact may expose selected Mesut
+> telemetry through its dynamic terminal interface." `xact-mesut` now registers a `BranchObserver`
+> on the shared `MesuT` runtime (`MesuT::with_observer`, replacing Mesut's own animation observer
+> so nothing is duplicated per section 20's closing note) that captures every real
+> `Submitted`/`Routed`/`Queued`/`Started`/`Completed`/`Failed`/`Cancelled` event and routes it to
+> whichever `PendingTask` subscribed for that task, translated into a Xact-owned `LifecycleEvent`
+> so no crate outside `xact-mesut` needs a `mesut`/`mesut-observe` dependency. `Pending::
+> drain_events` (non-blocking, best-effort — the authoritative result still comes from
+> `join`/`try_join`) surfaces these; `xact-cli` prints them only for `! CONCURRENTLY` branches
+> (a `CONSECUTIVELY` command blocks until done, so there's no gap to narrate), draining both
+> before and immediately after a branch is found finished so a `Completed`/`Failed` event that
+> arrives on its own channel at nearly the same moment as the result isn't lost. Also fixed along
+> the way: the adapter's `Work` job now mirrors a real domain failure (e.g. a missing binary) into
+> Mesut's own result as `TaskError::ExecutionFailed`, so Mesut's `Completed`/`Failed` telemetry
+> agrees with Xact's outcome instead of Mesut always seeing "completed" because the wrapper
+> closure itself never panics. Verified live: `! CONCURRENTLY` branches now show real transitions
+> (`submitted` → `routed to Blocking(...)` → `queued` → `started on ...` → `completed in Nms`)
+> ahead of Xact's own outcome line, and a genuine failure shows `failed: ...` from both layers in
+> agreement. Full test suite green, zero regressions. See `crates/xact-mesut/src/lib.rs` module
+> docs for the full detail.
 
 ---
 

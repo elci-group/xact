@@ -20,6 +20,16 @@
 //! blocking and a non-blocking way to run a plan; `session.schedule()` is
 //! what tells this loop which one to call.
 //!
+//! Terminal state (spec section 20, Xact–Mesut Integration Phase 4): only
+//! `! CONCURRENTLY` branches have anything worth showing between the
+//! semantic "accepted"/outcome lines this loop already prints — a
+//! `CONSECUTIVELY` command blocks until it's done, so there's no gap to
+//! narrate. `drain_ready` prints each branch's real Mesut lifecycle
+//! events (`[description] started on ...`, `completed in Nms`, ...) as
+//! they arrive, ahead of the next prompt; this is Mesut's
+//! execution-oriented telemetry, distinct from — and printed separately
+//! from — Xact's own semantic outcome line for that same branch.
+//!
 //! `@` blocks may be typed across several lines for readability (matching
 //! spec section 9's example layout): once a line starts with `@`, the REPL
 //! keeps reading continuation lines until a blank line, then submits the
@@ -38,24 +48,67 @@ use xact_planner::PlanOutcome;
 /// paired with the description printed for `£ ...` when they were queued.
 type PendingBranches = Vec<(String, Pending)>;
 
-/// Prints any branches that have finished since the last check, without
-/// blocking on the ones still running.
+/// Prints any lifecycle telemetry and finished outcomes for branches
+/// since the last check, without blocking on the ones still running.
+/// Drains events both before *and* right after checking a branch for
+/// completion: the terminal `Completed`/`Failed` event and the branch's
+/// real result travel over independent channels and can arrive in either
+/// order, so a drain only before `try_join` could have a just-arrived
+/// terminal event silently discarded along with the branch once it's
+/// removed from `pending`.
 fn drain_ready(pending: &mut PendingBranches) {
-    pending.retain_mut(|(description, branch)| match branch.try_join() {
-        Some(outcome) => {
-            print_outcome(Some(description), &outcome);
-            false
+    pending.retain_mut(|(description, branch)| {
+        for event in branch.drain_events() {
+            print_lifecycle_event(description, &event);
         }
-        None => true,
+        match branch.try_join() {
+            Some(outcome) => {
+                for event in branch.drain_events() {
+                    print_lifecycle_event(description, &event);
+                }
+                print_outcome(Some(description), &outcome);
+                false
+            }
+            None => true,
+        }
     });
 }
 
 /// Blocks until every remaining branch has finished — used at session end
-/// so nothing started under `! CONCURRENTLY` is left unreported.
+/// so nothing started under `! CONCURRENTLY` is left unreported. Polls
+/// rather than calling `Pending::join` directly so it can keep draining
+/// lifecycle events (see `drain_ready`'s doc comment) right up to the
+/// moment the result arrives.
 fn join_all(pending: PendingBranches) {
-    for (description, branch) in pending {
-        print_outcome(Some(&description), &branch.join());
+    for (description, mut branch) in pending {
+        let outcome = loop {
+            for event in branch.drain_events() {
+                print_lifecycle_event(&description, &event);
+            }
+            if let Some(outcome) = branch.try_join() {
+                break outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        for event in branch.drain_events() {
+            print_lifecycle_event(&description, &event);
+        }
+        print_outcome(Some(&description), &outcome);
     }
+}
+
+fn print_lifecycle_event(description: &str, event: &xact_mesut::LifecycleEvent) {
+    use xact_mesut::LifecycleEvent;
+    let detail = match event {
+        LifecycleEvent::Submitted => "submitted".to_string(),
+        LifecycleEvent::Routed { route } => format!("routed to {route}"),
+        LifecycleEvent::Queued { queue_depth } => format!("queued (depth {queue_depth})"),
+        LifecycleEvent::Started { executor } => format!("started on {executor}"),
+        LifecycleEvent::Completed { duration_ms } => format!("completed in {duration_ms}ms"),
+        LifecycleEvent::Failed { error } => format!("failed: {error}"),
+        LifecycleEvent::Cancelled { reason } => format!("cancelled: {reason}"),
+    };
+    println!("  [{description}] {detail}");
 }
 
 fn print_outcome(branch: Option<&str>, outcome: &ExecutionOutcome) {

@@ -20,6 +20,11 @@
 //! "independent execution branches" (Xact–Mesut Integration Phase 3).
 //! `xact-cli` is the only caller that chooses between them, based on the
 //! session's established schedule policy.
+//!
+//! [`Pending::drain_events`] additionally surfaces Mesut's real execution
+//! lifecycle telemetry for a branch (Xact–Mesut Integration Phase 4) —
+//! non-blocking and best-effort, separate from the authoritative outcome
+//! `join`/`try_join` report (spec section 19).
 
 use std::path::PathBuf;
 
@@ -119,6 +124,17 @@ impl Pending {
             PendingKind::Run { command_line, task } => {
                 task.try_join().map(|result| run_outcome(command_line.clone(), result))
             }
+        }
+    }
+
+    /// Mesut's execution-oriented telemetry for this branch since the
+    /// last call, non-blocking (spec section 19 — supplementary to, never
+    /// a substitute for, the outcome `join`/`try_join` reports).
+    pub fn drain_events(&mut self) -> Vec<xact_mesut::LifecycleEvent> {
+        match &mut self.0 {
+            PendingKind::Bank { task } => task.drain_events(),
+            PendingKind::View { task, .. } => task.drain_events(),
+            PendingKind::Run { task, .. } => task.drain_events(),
         }
     }
 }

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 mesut = { workspace = true }
+mesut-observe = { workspace = true }
 xact-process = { workspace = true }
 xact-bank = { workspace = true }
 xact-see = { workspace = true }

@@ -30,3 +30,4 @@ xact-mesut = { path = "crates/xact-mesut" }
 xact-core = { path = "crates/xact-core" }
 
 mesut = { path = "../mesut/crates/mesut" }
+mesut-observe = { path = "../mesut/crates/mesut-observe" }

@@ -63,12 +63,44 @@
 //! wraps these into its own `ExecutionOutcome`-typed handle; `xact-cli` is
 //! the only place that decides, from the session's established schedule
 //! policy, whether to call the blocking or the `_async` adapter function.
+//!
+//! # Phase 4 (this crate, now)
+//!
+//! Directive section 32's Phase 4: "Connect Mesut execution events to
+//! Xact's terminal state model." Section 19 draws the line this crate
+//! keeps: "Xact's user-facing diagnostic model SHALL remain semantic.
+//! Mesut's telemetry SHALL remain execution-oriented... Xact may expose
+//! selected Mesut telemetry through its dynamic terminal interface." The
+//! result each `PendingTask`/`join`/`try_join` already reports *is* that
+//! semantic diagnostic (`ran '...' — exited 0`); it does not depend on
+//! anything below.
+//!
+//! [`LifecycleEvent`] is Mesut's execution-oriented telemetry, translated
+//! out of `mesut_observe::TaskEventType` so nothing outside this crate
+//! needs a `mesut`/`mesut-observe` dependency (section 28's isolation
+//! invariant). A [`BranchObserver`] registered on the shared runtime via
+//! `MesuT::with_observer` (replacing whichever observer `RuntimeConfig`
+//! picked — this crate already disables Mesut's own animation observer,
+//! so nothing is duplicated per section 20's "Mesut's existing
+//! lifecycle-driven terminal animation behaviour SHALL remain
+//! Mesut-owned") captures every real `Submitted`/`Routed`/`Queued`/
+//! `Started`/`Completed`/`Failed`/`Cancelled` event Mesut fires and routes
+//! it to whichever `PendingTask` subscribed for that task's ID —
+//! `submit` now does that subscription before admitting the work, so no
+//! event can be missed. `PendingTask::drain_events` hands them out,
+//! non-blocking, best-effort: a caller that never polls loses nothing
+//! that matters, because the authoritative outcome still comes from
+//! `join`/`try_join`. `xact-cli` is the only caller that actually prints
+//! these, and only for `! CONCURRENTLY` branches — see its module docs.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use mesut::prelude::*;
+use mesut::{EventObserver, TaskError, TaskEvent};
+use mesut_observe::TaskEventType;
 
 /// The outcome of a process run through the Mesut adapter — the same
 /// success/exit-code shape `std::process::ExitStatus` reports, but owned
@@ -78,6 +110,74 @@ use mesut::prelude::*;
 pub struct ProcessOutcome {
     pub success: bool,
     pub code: Option<i32>,
+}
+
+/// Mesut's execution-oriented telemetry for one task (spec section 19),
+/// translated out of `mesut_observe::TaskEventType` so callers outside
+/// this crate never need a `mesut`/`mesut-observe` dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleEvent {
+    Submitted,
+    Routed { route: String },
+    Queued { queue_depth: usize },
+    Started { executor: String },
+    Completed { duration_ms: u128 },
+    Failed { error: String },
+    Cancelled { reason: String },
+}
+
+impl LifecycleEvent {
+    /// Real Mesut lifecycle events terminate in exactly one of these three
+    /// — once one arrives for a task, no further event will.
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. })
+    }
+}
+
+impl From<&TaskEventType> for LifecycleEvent {
+    fn from(event_type: &TaskEventType) -> Self {
+        match event_type {
+            TaskEventType::Submitted { .. } => Self::Submitted,
+            TaskEventType::Routed { route } => Self::Routed { route: route.clone() },
+            TaskEventType::Queued { queue_depth } => Self::Queued { queue_depth: *queue_depth },
+            TaskEventType::Started { executor_id } => Self::Started { executor: executor_id.clone() },
+            TaskEventType::Completed { duration_ms } => Self::Completed { duration_ms: *duration_ms },
+            TaskEventType::Failed { error } => Self::Failed { error: error.clone() },
+            TaskEventType::Cancelled { reason } => Self::Cancelled { reason: reason.clone() },
+        }
+    }
+}
+
+/// Routes each real Mesut [`TaskEvent`] to whichever [`PendingTask`]
+/// subscribed for that event's task ID. Self-cleaning: a subscriber entry
+/// is removed the moment a terminal event is delivered to it, regardless
+/// of whether anything ever polled for it, so a `PendingTask` that's
+/// dropped without calling `drain_events` cannot leak an entry here.
+#[derive(Default)]
+struct BranchObserver {
+    subscribers: Mutex<HashMap<TaskId, std::sync::mpsc::Sender<LifecycleEvent>>>,
+}
+
+impl BranchObserver {
+    fn subscribe(&self, task_id: TaskId) -> std::sync::mpsc::Receiver<LifecycleEvent> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.subscribers.lock().unwrap().insert(task_id, tx);
+        rx
+    }
+}
+
+impl EventObserver for BranchObserver {
+    fn observe(&self, event: &TaskEvent) {
+        let lifecycle = LifecycleEvent::from(&event.event_type);
+        let mut subscribers = self.subscribers.lock().unwrap();
+        let Some(sender) = subscribers.get(&event.task_id) else {
+            return;
+        };
+        let _ = sender.send(lifecycle.clone());
+        if lifecycle.is_terminal() {
+            subscribers.remove(&event.task_id);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -119,9 +219,14 @@ fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+fn shared_observer() -> &'static Arc<BranchObserver> {
+    static OBSERVER: OnceLock<Arc<BranchObserver>> = OnceLock::new();
+    OBSERVER.get_or_init(|| Arc::new(BranchObserver::default()))
+}
+
 fn shared_mesut() -> &'static MesuT {
     static MESUT: OnceLock<MesuT> = OnceLock::new();
-    MESUT.get_or_init(runtime)
+    MESUT.get_or_init(|| runtime().with_observer(shared_observer().clone()))
 }
 
 /// A handle to blocking [`Work`] admitted onto the shared Mesut runtime.
@@ -130,6 +235,7 @@ fn shared_mesut() -> &'static MesuT {
 /// this only controls when *this caller* waits for the result.
 pub struct PendingTask<T> {
     rx: std::sync::mpsc::Receiver<Result<T, String>>,
+    events: std::sync::mpsc::Receiver<LifecycleEvent>,
 }
 
 impl<T> PendingTask<T> {
@@ -151,6 +257,14 @@ impl<T> PendingTask<T> {
             }
         }
     }
+
+    /// Drains every [`LifecycleEvent`] observed for this task since the
+    /// last call, without blocking. Best-effort telemetry (spec section
+    /// 19) — nothing about correctness depends on a caller ever polling
+    /// this.
+    pub fn drain_events(&mut self) -> Vec<LifecycleEvent> {
+        std::iter::from_fn(|| self.events.try_recv().ok()).collect()
+    }
 }
 
 /// Admits `job` as blocking [`Work`] on the shared Mesut runtime and
@@ -170,15 +284,30 @@ fn submit<T: Send + 'static>(
     let work = Work::new(WorkKind::Blocking)
         .with_label(label)
         .with_job(move |_cancellation| {
-            let _ = tx.send(job());
-            Ok(Vec::new())
+            let result = job();
+            // Mirrored into Mesut's own Work result so its Completed/Failed
+            // telemetry reflects the real domain outcome (a genuine adapter
+            // failure, e.g. a missing binary) rather than only whether this
+            // wrapper closure panicked. A normal nonzero exit status is
+            // still `Ok` here — `job()` only returns `Err` for a failure to
+            // launch at all, never for the process's own exit code.
+            let mesut_result = match &result {
+                Ok(_) => Ok(Vec::new()),
+                Err(message) => Err(TaskError::ExecutionFailed(message.clone())),
+            };
+            let _ = tx.send(result);
+            mesut_result
         });
+
+    // Subscribed before submission is admitted, so no event — not even
+    // `Submitted` itself — can fire before there is a receiver for it.
+    let events = shared_observer().subscribe(work.id);
 
     tokio_runtime()
         .block_on(shared_mesut().submit(work))
         .map_err(|err| AdapterError(err.to_string()))?;
 
-    Ok(PendingTask { rx })
+    Ok(PendingTask { rx, events })
 }
 
 /// Runs `command_line` behind the Mesut adapter (`£ RUN`'s execution
@@ -334,5 +463,35 @@ mod tests {
 
         let outcome = branch.join().expect("sleep should launch");
         assert!(outcome.success);
+    }
+
+    /// Proves lifecycle telemetry is real Mesut events, not fabricated:
+    /// a submitted task must eventually report `Submitted` and exactly
+    /// one terminal event (`Completed` here, since `true` succeeds).
+    #[test]
+    fn drain_events_reports_real_lifecycle_including_a_terminal_event() {
+        let mut branch = run_process_async("true".into()).expect("submission should be admitted");
+
+        // The result (via try_join) and the terminal lifecycle event are
+        // delivered through independent channels and can arrive in either
+        // order, so wait for the event itself rather than for try_join.
+        let mut events = Vec::new();
+        let mut result = None;
+        for _ in 0..100 {
+            events.extend(branch.drain_events());
+            if result.is_none() {
+                result = branch.try_join();
+            }
+            if events.iter().any(LifecycleEvent::is_terminal) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(result.is_some(), "the process should have completed within 1s: {events:?}");
+        assert!(events.contains(&LifecycleEvent::Submitted), "expected a Submitted event: {events:?}");
+        let terminal: Vec<_> = events.iter().filter(|e| e.is_terminal()).collect();
+        assert_eq!(terminal.len(), 1, "expected exactly one terminal event: {events:?}");
+        assert!(matches!(terminal[0], LifecycleEvent::Completed { .. }), "expected Completed: {events:?}");
     }
 }
