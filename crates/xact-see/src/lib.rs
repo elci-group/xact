@@ -68,9 +68,10 @@ mod tests {
     /// test asserting against the real `gls` could race against another
     /// test's `PATH` mutation. Keeping every `PATH`-sensitive case
     /// sequential in one function sidesteps that without depending on how
-    /// the harness is invoked. `bat` isn't installed on this machine, so
-    /// its behavior is verified against an executable stub standing in
-    /// for it, rather than skipped.
+    /// the harness is invoked. `bat`'s dispatch is verified against an
+    /// executable stub rather than the real binary, so this test doesn't
+    /// depend on `bat` being installed or on the exact exit-code behavior
+    /// of whatever version is.
     #[test]
     fn see_adapter_dispatches_by_tool_name() {
         assert!(
