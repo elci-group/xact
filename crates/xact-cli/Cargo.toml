@@ -1,0 +1,13 @@
+[package]
+name = "xact-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xact"
+path = "src/main.rs"
+
+[dependencies]
+xact-ast = { workspace = true }
+xact-core = { workspace = true }

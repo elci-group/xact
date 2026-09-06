@@ -1,0 +1,1 @@
+//! Agent language (spec section 9): `@` blocks — TELL/TEAM/READING/POPULATING/BE/THINK — producing semantic intents for delegation, always subordinate to the policy engine. Not yet implemented; Phase 1 only recognizes and rejects `@` at the parser boundary.

@@ -1,0 +1,5 @@
+[package]
+name = "xact-terminal"
+edition.workspace = true
+version.workspace = true
+license.workspace = true

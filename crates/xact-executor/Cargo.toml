@@ -1,0 +1,5 @@
+[package]
+name = "xact-executor"
+edition.workspace = true
+version.workspace = true
+license.workspace = true

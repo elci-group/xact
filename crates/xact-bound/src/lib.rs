@@ -1,0 +1,1 @@
+//! Typed adapter over the `bound` tool for source aggregation (spec sections 4, 12). Xact must never reimplement bound's traversal/filtering/dependency-resolution semantics — this crate is the integration boundary. Not yet implemented.

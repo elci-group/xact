@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+xact-ast = { path = "crates/xact-ast" }
+xact-lexer = { path = "crates/xact-lexer" }
+xact-parser = { path = "crates/xact-parser" }
+xact-diagnostics = { path = "crates/xact-diagnostics" }
+xact-completion = { path = "crates/xact-completion" }
+xact-reference = { path = "crates/xact-reference" }
+xact-semantic = { path = "crates/xact-semantic" }
+xact-policy = { path = "crates/xact-policy" }
+xact-planner = { path = "crates/xact-planner" }
+xact-executor = { path = "crates/xact-executor" }
+xact-process = { path = "crates/xact-process" }
+xact-resource = { path = "crates/xact-resource" }
+xact-agent = { path = "crates/xact-agent" }
+xact-team = { path = "crates/xact-team" }
+xact-terminal = { path = "crates/xact-terminal" }
+xact-bound = { path = "crates/xact-bound" }
+xact-bank = { path = "crates/xact-bank" }
+xact-core = { path = "crates/xact-core" }

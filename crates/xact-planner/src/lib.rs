@@ -1,0 +1,1 @@
+//! Execution planner (spec section 20): Intent -> ResolvedIntent -> ExecutionPlan, choosing native vs ELci-tool-backed execution (section 21) and combining scheduling (section 23) with resource policy (section 22). Not yet implemented — xact-core currently stops at semantic validation.

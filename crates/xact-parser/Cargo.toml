@@ -1,0 +1,10 @@
+[package]
+name = "xact-parser"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+xact-ast = { workspace = true }
+xact-lexer = { workspace = true }
+xact-diagnostics = { workspace = true }

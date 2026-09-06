@@ -1,0 +1,1 @@
+//! Policy language (spec section 8): `!` blocks — WITH/WITHOUT, PREFER/DODGE, SPEND/SAVE, CONCURRENTLY/CONSECUTIVELY, WHEN — as typed policy nodes, with hard constraints evaluated before preferences. Not yet implemented; Phase 1 only recognizes and rejects `!` at the lexer/parser boundary (see xact-parser).

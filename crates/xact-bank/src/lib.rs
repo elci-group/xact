@@ -1,0 +1,1 @@
+//! Typed adapter over the `bank` tool for resource establishment — directories and empty files (spec sections 6, 13). Xact must not reimplement mkdir+touch semantics — this crate is the integration boundary. Not yet implemented.
