@@ -5,6 +5,12 @@ version = 4
 [[package]]
 name = "xact-agent"
 version = "0.1.0"
+dependencies = [
+ "xact-ast",
+ "xact-diagnostics",
+ "xact-reference",
+ "xact-semantic",
+]
 
 [[package]]
 name = "xact-ast"
@@ -37,6 +43,7 @@ dependencies = [
 name = "xact-core"
 version = "0.1.0"
 dependencies = [
+ "xact-agent",
  "xact-ast",
  "xact-completion",
  "xact-diagnostics",

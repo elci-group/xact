@@ -1,8 +1,6 @@
 //! Typed AST for the Xact `£` imperative language (spec section 7),
 //! ownership vocabulary (section 10), reference vocabulary (section 11),
-//! and `!` policy language (spec section 8).
-//!
-//! The agent (`@`) language is not modelled yet.
+//! `!` policy language (spec section 8), and `@` agent language (section 9).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
@@ -314,10 +312,120 @@ pub struct PolicyStatement {
     pub args: PolicyArgs,
 }
 
-/// One parsed input line: either a policy statement or an imperative/identity
-/// command (spec section 17: a block is made of both kinds of line).
+/// The `@` agent primitives that head a block (spec section 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentVerb {
+    Tell,
+    Team,
+}
+
+impl AgentVerb {
+    pub const ALL: [AgentVerb; 2] = [AgentVerb::Tell, AgentVerb::Team];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentVerb::Tell => "TELL",
+            AgentVerb::Team => "TEAM",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "TELL" => AgentVerb::Tell,
+            "TEAM" => AgentVerb::Team,
+            _ => return None,
+        })
+    }
+}
+
+/// The clause keywords that configure an agent block (spec section 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentClauseKind {
+    Be,
+    Reading,
+    Populating,
+    Think,
+}
+
+impl AgentClauseKind {
+    pub const ALL: [AgentClauseKind; 4] = [
+        AgentClauseKind::Be,
+        AgentClauseKind::Reading,
+        AgentClauseKind::Populating,
+        AgentClauseKind::Think,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentClauseKind::Be => "BE",
+            AgentClauseKind::Reading => "READING",
+            AgentClauseKind::Populating => "POPULATING",
+            AgentClauseKind::Think => "THINK",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "BE" => AgentClauseKind::Be,
+            "READING" => AgentClauseKind::Reading,
+            "POPULATING" => AgentClauseKind::Populating,
+            "THINK" => AgentClauseKind::Think,
+            _ => return None,
+        })
+    }
+}
+
+/// One configured clause of an `@` agent block. Each kind is a singleton —
+/// it may appear at most once per block (spec section 16's operator
+/// metadata, applied here to agent clauses).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentClause {
+    Be { persona: String, span: Span },
+    Reading { operand: Operand, span: Span },
+    Populating { operand: Operand, span: Span },
+    Think { budget: u32, span: Span },
+}
+
+impl AgentClause {
+    pub fn kind(&self) -> AgentClauseKind {
+        match self {
+            AgentClause::Be { .. } => AgentClauseKind::Be,
+            AgentClause::Reading { .. } => AgentClauseKind::Reading,
+            AgentClause::Populating { .. } => AgentClauseKind::Populating,
+            AgentClause::Think { .. } => AgentClauseKind::Think,
+        }
+    }
+}
+
+/// `@ TELL 'GPT-5.6-luna' BE "..." READING MY ~/project/ POPULATING MY
+/// ~/project/review/ THINK 80 "Review this project."` (spec section 9).
+///
+/// Agent blocks produce semantic intents, not unrestricted shell access —
+/// the policy engine remains authoritative over whatever a planner later
+/// does with one (spec section 9, section 21).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentBlock {
+    pub verb: AgentVerb,
+    pub verb_span: Span,
+    pub target: String,
+    pub target_span: Span,
+    pub clauses: Vec<AgentClause>,
+    pub instruction: String,
+    pub instruction_span: Span,
+}
+
+impl AgentBlock {
+    pub fn clause(&self, kind: AgentClauseKind) -> Option<&AgentClause> {
+        self.clauses.iter().find(|c| c.kind() == kind)
+    }
+}
+
+/// One parsed input line: a policy statement, an imperative/identity
+/// command, or an agent block (spec section 17: a block is made of these
+/// kinds of line).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
     Policy(PolicyStatement),
     Command(Command),
+    Agent(AgentBlock),
 }

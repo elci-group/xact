@@ -8,7 +8,8 @@
 //! therefore means "grammatically and semantically valid, ready to plan",
 //! not "ran".
 
-use xact_ast::{Command, Line, PolicyStatement};
+use xact_agent::ValidatedAgentBlock;
+use xact_ast::{AgentBlock, Command, Line, PolicyStatement};
 use xact_diagnostics::Diagnostic;
 use xact_parser::{parse_line, ParseOutcome};
 use xact_policy::PolicyContext;
@@ -24,6 +25,10 @@ pub enum SessionOutcome {
     /// part of this session's active policy context. Not yet enforced by
     /// any executor.
     PolicyAccepted(PolicyStatement),
+    /// A grammatically and semantically valid agent block — a semantic
+    /// intent, not a dispatch to any actual agent provider (spec section 9;
+    /// `xact-agent`/`xact-planner` do not run agents yet).
+    AgentAccepted(AgentBlock),
     /// A valid prefix that needs more input before it can be evaluated.
     Incomplete(Diagnostic),
     /// Cannot be accepted as typed.
@@ -60,6 +65,12 @@ impl Session {
                 Ok(applied) => SessionOutcome::PolicyAccepted(applied),
                 Err(diagnostic) => SessionOutcome::Rejected(vec![diagnostic]),
             },
+            ParseOutcome::Complete(Line::Agent(block)) => {
+                match xact_agent::validate(block, &self.identity, &self.references) {
+                    Ok(ValidatedAgentBlock { block }) => SessionOutcome::AgentAccepted(block),
+                    Err(diagnostics) => SessionOutcome::Rejected(diagnostics),
+                }
+            }
             ParseOutcome::Incomplete(diag) => SessionOutcome::Incomplete(diag),
             ParseOutcome::Invalid(diag) => SessionOutcome::Rejected(vec![diag]),
         }
@@ -150,5 +161,36 @@ mod tests {
         assert!(!suggestions.contains(&"CONCURRENTLY".to_string()));
         assert!(!suggestions.contains(&"CONSECUTIVELY".to_string()));
         assert!(suggestions.contains(&"WITH".to_string()));
+    }
+
+    #[test]
+    fn agent_block_accepted() {
+        let mut session = Session::new();
+        assert!(matches!(
+            session.submit("@ TELL 'GPT-5.6-luna' BE \"a meticulous senior Rust engineer\" READING MY ~/project/ POPULATING MY ~/project/review/ THINK 80 \"Review this project.\""),
+            SessionOutcome::AgentAccepted(_)
+        ));
+    }
+
+    #[test]
+    fn agent_reading_their_rejected_without_identity() {
+        let mut session = Session::new();
+        assert!(matches!(
+            session.submit("@ TELL 'x' READING THEIR ~/shared \"go\""),
+            SessionOutcome::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn agent_populating_that_resolves_from_prior_command() {
+        let mut session = Session::new();
+        assert!(matches!(
+            session.submit("£ SEE MY ~/project/review/"),
+            SessionOutcome::Accepted(_)
+        ));
+        assert!(matches!(
+            session.submit("@ TELL 'x' POPULATING THAT \"go\""),
+            SessionOutcome::AgentAccepted(_)
+        ));
     }
 }

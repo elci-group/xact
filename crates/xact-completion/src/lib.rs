@@ -68,6 +68,20 @@ mod tests {
     }
 
     #[test]
+    fn suggests_agent_verbs_after_at() {
+        let suggestions = complete("@");
+        assert_eq!(suggestions, vec!["TELL".to_string(), "TEAM".to_string()]);
+    }
+
+    #[test]
+    fn suggests_remaining_clauses_and_instruction_placeholder() {
+        let suggestions = complete("@ TELL 'x' BE \"engineer\"");
+        assert!(!suggestions.contains(&"BE".to_string()));
+        assert!(suggestions.contains(&"READING".to_string()));
+        assert!(suggestions.contains(&"'...'".to_string()));
+    }
+
+    #[test]
     fn does_not_suggest_operators_after_an_operator() {
         // Spec section 15: SEE/EDIT/MOVE/COPY must not appear as suggestions
         // once a verb slot has already been filled by another verb.

@@ -69,7 +69,11 @@ pub fn validate(
     }
 }
 
-fn check_operand(
+/// Checks a single operand's ownership and reference validity. Exposed for
+/// reuse by other language surfaces built on the same `Operand` type — e.g.
+/// `xact-agent`'s `READING`/`POPULATING` clauses (spec section 9) reuse
+/// exactly this ownership/reference validation rather than reimplementing it.
+pub fn check_operand(
     operand: Option<&Operand>,
     identity: &IdentityContext,
     references: &ReferenceContext,

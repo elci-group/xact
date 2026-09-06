@@ -11,8 +11,8 @@
 //! report "not supported yet".
 
 use xact_ast::{
-    Command, IdentityDeclaration, ImperativeCommand, Line, Operand, OwnershipKind, PolicyArgKind, PolicyArgs,
-    PolicyOperator, PolicyStatement, ReferenceKind, ResourceQuota, Span, Verb,
+    AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Command, IdentityDeclaration, ImperativeCommand, Line, Operand,
+    OwnershipKind, PolicyArgKind, PolicyArgs, PolicyOperator, PolicyStatement, ReferenceKind, ResourceQuota, Span, Verb,
 };
 use xact_diagnostics::Diagnostic;
 use xact_lexer::{tokenize, Token, TokenKind};
@@ -54,19 +54,35 @@ fn policy_operator_expected() -> Vec<String> {
     PolicyOperator::ALL.iter().map(|op| op.as_str().to_string()).collect()
 }
 
+fn agent_verb_expected() -> Vec<String> {
+    AgentVerb::ALL.iter().map(|v| v.as_str().to_string()).collect()
+}
+
+/// What can legally come next inside an agent block: any clause keyword not
+/// already used, plus the instruction string that closes the block (spec
+/// section 16: a singleton clause must not be suggested again).
+fn agent_continuation_expected(used: &[AgentClause]) -> Vec<String> {
+    AgentClauseKind::ALL
+        .iter()
+        .filter(|kind| !used.iter().any(|c| c.kind() == **kind))
+        .map(|kind| kind.as_str().to_string())
+        .chain(std::iter::once("'...'".to_string()))
+        .collect()
+}
+
 pub fn parse_tokens(tokens: &[Token]) -> ParseOutcome {
     let first = &tokens[0];
     match &first.kind {
         TokenKind::Eof => Diagnostic::incomplete("Expected a command.", first.span, vec!["£".into()]).into_incomplete(),
         TokenKind::Pound => parse_after_pound(tokens, 1),
         TokenKind::Bang => parse_policy(tokens, 1),
-        TokenKind::At => {
-            Diagnostic::invalid("Agent blocks (@) are not supported yet.", first.span, vec!["£".into()]).into_invalid()
-        }
-        TokenKind::Word(_) | TokenKind::StringLit(_) => {
-            Diagnostic::invalid("Commands must begin with £ or !.", first.span, vec!["£".into(), "!".into()])
-                .into_invalid()
-        }
+        TokenKind::At => parse_agent(tokens, 1),
+        TokenKind::Word(_) | TokenKind::StringLit(_) => Diagnostic::invalid(
+            "Commands must begin with £, !, or @.",
+            first.span,
+            vec!["£".into(), "!".into(), "@".into()],
+        )
+        .into_invalid(),
     }
 }
 
@@ -410,6 +426,200 @@ fn parse_quota(word: &str, span: Span) -> Result<ResourceQuota, String> {
     })
 }
 
+fn parse_agent(tokens: &[Token], idx: usize) -> ParseOutcome {
+    let tok = &tokens[idx];
+    match &tok.kind {
+        TokenKind::Eof => {
+            Diagnostic::incomplete("@ requires TELL or TEAM.", tok.span, agent_verb_expected()).into_incomplete()
+        }
+        TokenKind::Word(w) => match AgentVerb::from_str(&w.to_uppercase()) {
+            Some(verb) => parse_agent_target(tokens, idx + 1, verb, tok.span),
+            None => {
+                Diagnostic::invalid(format!("Unknown agent verb '{w}'."), tok.span, agent_verb_expected()).into_invalid()
+            }
+        },
+        _ => Diagnostic::invalid("Expected TELL or TEAM after @.", tok.span, agent_verb_expected()).into_invalid(),
+    }
+}
+
+fn parse_agent_target(tokens: &[Token], idx: usize, verb: AgentVerb, verb_span: Span) -> ParseOutcome {
+    let tok = &tokens[idx];
+    let (target, target_span) = match &tok.kind {
+        TokenKind::Eof => {
+            return Diagnostic::incomplete(
+                format!("{} requires a target agent name.", verb.as_str()),
+                tok.span,
+                vec!["'...'".into()],
+            )
+            .into_incomplete()
+        }
+        TokenKind::Word(w) => (w.clone(), tok.span),
+        TokenKind::StringLit(s) => (s.clone(), tok.span),
+        _ => {
+            return Diagnostic::invalid(
+                format!("{} requires a target agent name.", verb.as_str()),
+                tok.span,
+                vec!["'...'".into()],
+            )
+            .into_invalid()
+        }
+    };
+    parse_agent_clauses(tokens, idx + 1, verb, verb_span, target, target_span, Vec::new())
+}
+
+fn parse_agent_clauses(
+    tokens: &[Token],
+    mut idx: usize,
+    verb: AgentVerb,
+    verb_span: Span,
+    target: String,
+    target_span: Span,
+    mut clauses: Vec<AgentClause>,
+) -> ParseOutcome {
+    loop {
+        let tok = &tokens[idx];
+        match &tok.kind {
+            TokenKind::Eof => {
+                return Diagnostic::incomplete(
+                    "Expected a clause or the instruction to close this @ block.",
+                    tok.span,
+                    agent_continuation_expected(&clauses),
+                )
+                .into_incomplete()
+            }
+            TokenKind::StringLit(s) => {
+                let after = &tokens[idx + 1];
+                if !matches!(after.kind, TokenKind::Eof) {
+                    return Diagnostic::invalid("Unexpected input after the @ block's instruction.", after.span, vec![])
+                        .into_invalid();
+                }
+                return ParseOutcome::Complete(Line::Agent(AgentBlock {
+                    verb,
+                    verb_span,
+                    target,
+                    target_span,
+                    clauses,
+                    instruction: s.clone(),
+                    instruction_span: tok.span,
+                }));
+            }
+            TokenKind::Word(w) => {
+                let Some(kind) = AgentClauseKind::from_str(&w.to_uppercase()) else {
+                    return Diagnostic::invalid(
+                        format!("Unknown clause '{w}'."),
+                        tok.span,
+                        agent_continuation_expected(&clauses),
+                    )
+                    .into_invalid();
+                };
+                if clauses.iter().any(|c| c.kind() == kind) {
+                    return Diagnostic::invalid(
+                        format!("{} was already given for this @ block.", kind.as_str()),
+                        tok.span,
+                        vec![],
+                    )
+                    .into_invalid();
+                }
+                let (clause, next_idx) = match parse_agent_clause_arg(tokens, idx + 1, kind, tok.span) {
+                    Ok(pair) => pair,
+                    Err(outcome) => return outcome,
+                };
+                clauses.push(clause);
+                idx = next_idx;
+            }
+            TokenKind::Bang | TokenKind::At | TokenKind::Pound => {
+                return Diagnostic::invalid(
+                    "Expected a clause or the instruction to close this @ block.",
+                    tok.span,
+                    agent_continuation_expected(&clauses),
+                )
+                .into_invalid()
+            }
+        }
+    }
+}
+
+fn parse_agent_clause_arg(
+    tokens: &[Token],
+    idx: usize,
+    kind: AgentClauseKind,
+    kind_span: Span,
+) -> Result<(AgentClause, usize), ParseOutcome> {
+    match kind {
+        AgentClauseKind::Be => {
+            let tok = &tokens[idx];
+            match &tok.kind {
+                TokenKind::Eof => Err(Diagnostic::incomplete(
+                    "BE requires a persona description.",
+                    tok.span,
+                    vec!["'...'".into()],
+                )
+                .into_incomplete()),
+                TokenKind::Word(w) => Ok((
+                    AgentClause::Be {
+                        persona: w.clone(),
+                        span: Span::new(kind_span.start, tok.span.end),
+                    },
+                    idx + 1,
+                )),
+                TokenKind::StringLit(s) => Ok((
+                    AgentClause::Be {
+                        persona: s.clone(),
+                        span: Span::new(kind_span.start, tok.span.end),
+                    },
+                    idx + 1,
+                )),
+                _ => Err(
+                    Diagnostic::invalid("BE requires a persona description.", tok.span, vec!["'...'".into()])
+                        .into_invalid(),
+                ),
+            }
+        }
+        AgentClauseKind::Reading | AgentClauseKind::Populating => {
+            let (operand, next_idx) = parse_operand(tokens, idx, kind.as_str())?;
+            let span = Span::new(kind_span.start, operand.span().end);
+            let clause = if kind == AgentClauseKind::Reading {
+                AgentClause::Reading { operand, span }
+            } else {
+                AgentClause::Populating { operand, span }
+            };
+            Ok((clause, next_idx))
+        }
+        AgentClauseKind::Think => {
+            let tok = &tokens[idx];
+            match &tok.kind {
+                TokenKind::Eof => Err(Diagnostic::incomplete(
+                    "THINK requires a numeric budget, e.g. THINK 80.",
+                    tok.span,
+                    vec!["<number>".into()],
+                )
+                .into_incomplete()),
+                TokenKind::Word(w) => match w.parse::<u32>() {
+                    Ok(budget) => Ok((
+                        AgentClause::Think {
+                            budget,
+                            span: Span::new(kind_span.start, tok.span.end),
+                        },
+                        idx + 1,
+                    )),
+                    Err(_) => Err(Diagnostic::invalid(
+                        format!("'{w}' is not a valid THINK budget (expected a number)."),
+                        tok.span,
+                        vec!["<number>".into()],
+                    )
+                    .into_invalid()),
+                },
+                _ => Err(Diagnostic::invalid(
+                    "THINK requires a numeric budget, e.g. THINK 80.",
+                    tok.span,
+                    vec!["<number>".into()],
+                )
+                .into_invalid()),
+            }
+        }
+    }
+}
+
 trait IntoOutcome {
     fn into_incomplete(self) -> ParseOutcome;
     fn into_invalid(self) -> ParseOutcome;
@@ -440,6 +650,13 @@ mod tests {
         match outcome {
             ParseOutcome::Complete(Line::Policy(stmt)) => stmt,
             other => panic!("expected complete policy, got {other:?}"),
+        }
+    }
+
+    fn agent(outcome: ParseOutcome) -> AgentBlock {
+        match outcome {
+            ParseOutcome::Complete(Line::Agent(block)) => block,
+            other => panic!("expected complete agent block, got {other:?}"),
         }
     }
 
@@ -613,6 +830,74 @@ mod tests {
     fn policy_bad_quota_shape_rejected() {
         match parse_line("! SAVE RAM") {
             ParseOutcome::Invalid(diag) => assert!(diag.message.contains("not a resource quota")),
+            other => panic!("expected invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_block_minimal() {
+        let block = agent(parse_line("@ TELL 'GPT-5.6-luna' \"Review this project.\""));
+        assert_eq!(block.verb, AgentVerb::Tell);
+        assert_eq!(block.target, "GPT-5.6-luna");
+        assert!(block.clauses.is_empty());
+        assert_eq!(block.instruction, "Review this project.");
+    }
+
+    #[test]
+    fn agent_block_full_spec_example() {
+        let block = agent(parse_line(
+            "@ TELL 'GPT-5.6-luna' BE \"a meticulous senior Rust engineer\" READING MY ~/project/ POPULATING MY ~/project/review/ THINK 80 \"Review this project.\"",
+        ));
+        assert_eq!(block.clauses.len(), 4);
+        match block.clause(AgentClauseKind::Be) {
+            Some(AgentClause::Be { persona, .. }) => assert_eq!(persona, "a meticulous senior Rust engineer"),
+            other => panic!("expected BE clause, got {other:?}"),
+        }
+        match block.clause(AgentClauseKind::Reading) {
+            Some(AgentClause::Reading { operand: Operand::Owned { kind, path, .. }, .. }) => {
+                assert_eq!(*kind, Own::My);
+                assert_eq!(path, "~/project/");
+            }
+            other => panic!("expected READING clause, got {other:?}"),
+        }
+        match block.clause(AgentClauseKind::Think) {
+            Some(AgentClause::Think { budget, .. }) => assert_eq!(*budget, 80),
+            other => panic!("expected THINK clause, got {other:?}"),
+        }
+        assert_eq!(block.instruction, "Review this project.");
+    }
+
+    #[test]
+    fn agent_block_incomplete_without_instruction() {
+        match parse_line("@ TELL 'x' BE \"engineer\"") {
+            ParseOutcome::Incomplete(diag) => {
+                assert!(diag.expected.contains(&"READING".to_string()));
+                assert!(!diag.expected.contains(&"BE".to_string()));
+            }
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_block_rejects_duplicate_clause() {
+        match parse_line("@ TELL 'x' BE \"a\" BE \"b\" \"go\"") {
+            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("already given")),
+            other => panic!("expected invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_block_rejects_unknown_agent_verb() {
+        match parse_line("@ ASK 'x' \"go\"") {
+            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("Unknown agent verb")),
+            other => panic!("expected invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_block_think_requires_number() {
+        match parse_line("@ TELL 'x' THINK deep \"go\"") {
+            ParseOutcome::Invalid(diag) => assert!(diag.message.contains("not a valid THINK budget")),
             other => panic!("expected invalid, got {other:?}"),
         }
     }
