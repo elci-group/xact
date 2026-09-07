@@ -42,6 +42,15 @@
 //! dispatch, the same `ResourceBudget` plumbing, and the same
 //! `Pending`/lifecycle-event machinery as every other verb — no
 //! special-casing, which is the actual meaning of "unified."
+//!
+//! `ExecutionPlan::Agent` (Xact–Mesut Integration Phase 7 — "route agent
+//! workloads through Mesut") gets the same treatment again: `execute`/
+//! `execute_concurrent` build an `xact_tell::TellRequest` from the plan
+//! and hand it to `xact-mesut::tell`/`tell_async`, which submit it exactly
+//! like any other verb. `xact-executor` never imports anything
+//! provider-specific (no "ollama" anywhere here) — it only knows `@ TELL`
+//! has an `xact-tell` adapter, the same way it knows `RUN` has
+//! `xact-process`.
 
 use std::path::PathBuf;
 
@@ -66,6 +75,10 @@ pub enum ExecutionOutcome {
     /// A source set was aggregated via `bound` — `destination` names
     /// where, or `None` for `bound`'s own clipboard default.
     Bounded { source: PathBuf, destination: Option<PathBuf> },
+    /// A `@ TELL` block ran against a real agent provider. `populated`
+    /// names where the response was also written, if `POPULATING` was
+    /// stated.
+    Told { model: String, response: String, populated: Option<PathBuf> },
     Failed { message: String },
 }
 
@@ -84,6 +97,10 @@ pub fn execute(plan: ExecutionPlan, budget: ResourceBudget) -> ExecutionOutcome 
             destination.clone(),
             xact_mesut::bound_aggregate(source, destination, budget),
         ),
+        ExecutionPlan::Agent { model, persona, reading, populating, think, instruction } => {
+            let request = xact_tell::TellRequest { model: model.clone(), persona, reading, instruction, think };
+            told_outcome(model, populating.clone(), xact_mesut::tell(request, populating, budget))
+        }
     }
 }
 
@@ -115,6 +132,12 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
                 .map(|task| Pending(PendingKind::Bound { source, destination, task }))
                 .map_err(submission_failed)
         }
+        ExecutionPlan::Agent { model, persona, reading, populating, think, instruction } => {
+            let request = xact_tell::TellRequest { model: model.clone(), persona, reading, instruction, think };
+            xact_mesut::tell_async(request, populating.clone(), budget)
+                .map(|task| Pending(PendingKind::Agent { model, populated: populating, task }))
+                .map_err(submission_failed)
+        }
     }
 }
 
@@ -139,6 +162,11 @@ enum PendingKind {
         destination: Option<PathBuf>,
         task: xact_mesut::PendingTask<()>,
     },
+    Agent {
+        model: String,
+        populated: Option<PathBuf>,
+        task: xact_mesut::PendingTask<String>,
+    },
 }
 
 impl Pending {
@@ -149,6 +177,7 @@ impl Pending {
             PendingKind::View { path, tool, task } => view_outcome(path, tool, task.join()),
             PendingKind::Run { command_line, task } => run_outcome(command_line, task.join()),
             PendingKind::Bound { source, destination, task } => bound_outcome(source, destination, task.join()),
+            PendingKind::Agent { model, populated, task } => told_outcome(model, populated, task.join()),
         }
     }
 
@@ -165,6 +194,9 @@ impl Pending {
             PendingKind::Bound { source, destination, task } => {
                 task.try_join().map(|result| bound_outcome(source.clone(), destination.clone(), result))
             }
+            PendingKind::Agent { model, populated, task } => {
+                task.try_join().map(|result| told_outcome(model.clone(), populated.clone(), result))
+            }
         }
     }
 
@@ -177,6 +209,7 @@ impl Pending {
             PendingKind::View { task, .. } => task.drain_events(),
             PendingKind::Run { task, .. } => task.drain_events(),
             PendingKind::Bound { task, .. } => task.drain_events(),
+            PendingKind::Agent { task, .. } => task.drain_events(),
         }
     }
 }
@@ -195,6 +228,17 @@ fn bound_outcome(
 ) -> ExecutionOutcome {
     match result {
         Ok(()) => ExecutionOutcome::Bounded { source, destination },
+        Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+    }
+}
+
+fn told_outcome(
+    model: String,
+    populated: Option<PathBuf>,
+    result: Result<String, xact_mesut::AdapterError>,
+) -> ExecutionOutcome {
+    match result {
+        Ok(response) => ExecutionOutcome::Told { model, response, populated },
         Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
     }
 }
@@ -408,6 +452,51 @@ mod tests {
 
         assert_eq!(outcome, ExecutionOutcome::BankEstablished { path: target.clone() });
         assert!(dir.join("nested/dir").is_dir());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn agent_plan(instruction: &str, populating: Option<PathBuf>) -> ExecutionPlan {
+        ExecutionPlan::Agent {
+            model: "gemma3".into(),
+            persona: None,
+            reading: None,
+            populating,
+            think: None,
+            instruction: instruction.into(),
+        }
+    }
+
+    #[test]
+    fn agent_plan_fails_before_launching_for_an_unenforceable_resource() {
+        let budget = ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
+        let outcome = execute(agent_plan("hi", None), budget);
+        assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
+    }
+
+    /// Real, not stubbed: runs the actual local `ollama` model through
+    /// the full executor dispatch. Slow (model load + generation).
+    #[test]
+    fn agent_plan_runs_the_real_provider_and_populates_a_real_file() {
+        let dir = std::env::temp_dir().join(format!("xact-executor-agent-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("response.txt");
+
+        let outcome = execute(
+            agent_plan("Reply with exactly one word: hello", Some(out.clone())),
+            ResourceBudget::default(),
+        );
+
+        match outcome {
+            ExecutionOutcome::Told { model, response, populated } => {
+                assert_eq!(model, "gemma3");
+                assert!(!response.is_empty());
+                assert_eq!(populated, Some(out.clone()));
+                assert_eq!(std::fs::read_to_string(&out).unwrap(), response);
+            }
+            other => panic!("expected a Told outcome, got {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

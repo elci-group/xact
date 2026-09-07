@@ -747,6 +747,7 @@ dependencies = [
  "xact-ast",
  "xact-mesut",
  "xact-planner",
+ "xact-tell",
 ]
 
 [[package]]
@@ -768,6 +769,7 @@ dependencies = [
  "xact-bound",
  "xact-process",
  "xact-see",
+ "xact-tell",
 ]
 
 [[package]]
@@ -834,6 +836,16 @@ dependencies = [
 [[package]]
 name = "xact-team"
 version = "0.1.0"
+
+[[package]]
+name = "xact-tell"
+version = "0.1.0"
+dependencies = [
+ "xact-ast",
+ "xact-bank",
+ "xact-bound",
+ "xact-resource",
+]
 
 [[package]]
 name = "xact-terminal"

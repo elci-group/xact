@@ -112,6 +112,31 @@
 > dependency resolution, token/size/depth limits) is not implemented — only a single source and an
 > optional destination, matching what the existing operand/destination grammar already expresses;
 > widening the grammar itself is separate, larger work, not attempted here.
+>
+> **Phase 7 — done.** Directive: "Route agent workloads through Mesut." Section 14 lists the
+> lifecycle semantics agent execution must receive, same as any other workload: cancellation,
+> scheduling, dependencies, observability, resource constraints, concurrency, failure propagation.
+> `@ TELL` now has a real execution path — investigated first whether a real local agent provider
+> exists on this machine before building anything (the same discipline Phase 1's blocking finding
+> established): `ollama` is installed with two real local models pulled. New `xact-tell` crate
+> composes `ollama run <model> <prompt>` verbatim — `TELL`'s target string is never interpreted or
+> validated by Xact, only tried, the same "compose, don't reimplement" boundary `CREATE` draws with
+> `bank` — and keeps every provider detail inside itself (section 29, "No Semantic Leakage"):
+> nothing above `xact-tell` knows `ollama` exists. `READING` a directory is aggregated through the
+> real `bound` tool first (spec section 4's explicit instruction for `TELL` specifically), not
+> walked by hand; `POPULATING`, if given, gets the response written via `bank` then `fs::write`.
+> `THINK`'s numeric budget has no numeric equivalent in `ollama` (`--think` only accepts
+> true/false/low/medium/high) — rather than fabricating a number-to-level mapping, any `THINK`
+> value enables the real thinking-mode flag and the stated number is folded into the prompt text
+> itself, letting the model interpret it in its own words. `xact-mesut::tell`/`tell_async` submit
+> through the exact same `WorkKind::Blocking` seam as every other verb, so scheduling,
+> observability (real lifecycle events), resource constraints (real cgroup enforcement via
+> `xact-resource`), concurrency, and failure propagation all apply for free — verified live and by
+> a passing test suite. Cancellation and dependencies are explicitly not implemented (Phase 8 work,
+> not Phase 7 — neither exists for *any* verb yet, not just `TELL`). `TEAM` (spec section 21:
+> "TEAM -> Xact orchestration runtime") has no execution plan yet, reported the same way any other
+> not-yet-implemented verb is — a real scope boundary, not an oversight. Full test suite green. See
+> `crates/xact-tell/src/lib.rs` module docs for the full detail.
 
 ---
 

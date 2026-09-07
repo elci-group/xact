@@ -11,6 +11,13 @@
 //! `bound` binary (Xact–Mesut Integration Phase 6). Every other verb
 //! reports itself unsupported rather than silently doing nothing.
 //!
+//! `@ TELL ...` blocks are planned and executed the same way (Xact–Mesut
+//! Integration Phase 7) — `xact-planner::plan_agent` then
+//! `xact-executor`, exactly parallel to a `£` command's
+//! `xact-planner::plan` then `xact-executor`. `@ TEAM ...` is accepted as
+//! a validated intent but has no execution plan yet, same as any other
+//! unimplemented verb.
+//!
 //! Scheduling (spec section 23, Xact–Mesut Integration Phase 3): with no
 //! `! CONCURRENTLY`/`! CONSECUTIVELY` stated, or under `! CONSECUTIVELY`,
 //! each accepted command runs and is waited on before the next line is
@@ -34,9 +41,9 @@
 //! Resource policy (spec section 22, Xact–Mesut Integration Phase 5):
 //! `session.resource_budget()` resolves the session's accumulated
 //! `SPEND`/`SAVE` statements and is passed to every `execute`/
-//! `execute_concurrent` call — currently only `£ RUN` is actually
-//! constrained by it (real Linux cgroup v2 enforcement, via
-//! `xact-resource`), so a `£ RUN` under an active budget that names an
+//! `execute_concurrent` call — `£ RUN`, `£ BOUND`, and `@ TELL` are
+//! actually constrained by it (real Linux cgroup v2 enforcement, via
+//! `xact-resource`); a run under an active budget that names an
 //! unenforceable resource fails outright rather than running unconstrained.
 //!
 //! `@` blocks may be typed across several lines for readability (matching
@@ -146,6 +153,12 @@ fn print_outcome(branch: Option<&str>, outcome: &ExecutionOutcome) {
             }
             None => println!("{prefix}bound: aggregated {} to the clipboard", source.display()),
         },
+        ExecutionOutcome::Told { model, response, populated } => {
+            println!("{prefix}{model}: {response}");
+            if let Some(populated) = populated {
+                println!("{prefix}(also written to {})", populated.display());
+            }
+        }
         ExecutionOutcome::Failed { message } => {
             println!("{prefix}execution failed: {message}");
         }
@@ -235,8 +248,25 @@ fn main() {
                 }
             }
             SessionOutcome::AgentAccepted(block) => {
-                println!("agent intent accepted: {}", describe_agent(&block));
-                println!("  (no agent provider is wired up yet — this is a validated intent only.)");
+                let description = describe_agent(&block);
+                println!("agent intent accepted: {description}");
+                match xact_planner::plan_agent(&block, session.references()) {
+                    PlanOutcome::Plan(plan) => {
+                        let budget = session.resource_budget();
+                        if session.schedule() == Some(PolicyOperator::Concurrently) {
+                            match xact_executor::execute_concurrent(plan, budget) {
+                                Ok(branch) => {
+                                    println!("  queued as an independent branch ({} in flight)", pending.len() + 1);
+                                    pending.push((description, branch));
+                                }
+                                Err(outcome) => print_outcome(None, &outcome),
+                            }
+                        } else {
+                            print_outcome(None, &xact_executor::execute(plan, budget));
+                        }
+                    }
+                    PlanOutcome::Unsupported(reason) => println!("  {reason}"),
+                }
             }
             SessionOutcome::Incomplete(diag) => print!("{diag}"),
             SessionOutcome::Rejected(diagnostics) => {

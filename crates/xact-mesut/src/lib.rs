@@ -120,6 +120,24 @@
 //! `ResourceBudget` — rather than a special-cased path, which is the
 //! actual meaning of "unified": every real external-tool call goes
 //! through the same seam, whichever tool it happens to be.
+//!
+//! # Phase 7 (this crate, now)
+//!
+//! Directive section 32's Phase 7: "Route agent workloads through
+//! Mesut." Section 14 lists the lifecycle semantics agent execution must
+//! receive, same as any other workload: cancellation, scheduling,
+//! dependencies, observability, resource constraints, concurrency,
+//! failure propagation. [`tell`]/[`tell_async`] submit `@ TELL` the exact
+//! same way [`run_process`]/[`bound_aggregate`] submit their workloads —
+//! `WorkKind::Blocking`, real `ResourceBudget` enforcement, real
+//! lifecycle events, and `_async` concurrency — so all of that applies
+//! for free except cancellation and dependencies, which stay
+//! Phase 8 work (real mid-generation cancellation needs killing a running
+//! `ollama` child process, and `WHEN`-style dependencies need a real
+//! multi-command graph — neither exists yet for *any* verb, not just
+//! `TELL`). `xact-tell` is the only place that knows a real local LLM
+//! runtime is involved at all (spec section 29, "No Semantic Leakage") —
+//! this crate just hands it a `Work` item like everything else.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -429,6 +447,29 @@ pub fn bound_aggregate_async(
     })
 }
 
+/// Runs `request` through the real agent provider behind the Mesut
+/// adapter (`@ TELL`'s execution path), constrained by `budget`, writing
+/// the response to `populating` if given. `xact-tell` still owns the
+/// actual provider call and, via `xact-resource`, the actual enforcement.
+pub fn tell(
+    request: xact_tell::TellRequest,
+    populating: Option<PathBuf>,
+    budget: xact_ast::ResourceBudget,
+) -> Result<String, AdapterError> {
+    tell_async(request, populating, budget)?.join()
+}
+
+/// Same as [`tell`], but returns immediately as an independent branch.
+pub fn tell_async(
+    request: xact_tell::TellRequest,
+    populating: Option<PathBuf>,
+    budget: xact_ast::ResourceBudget,
+) -> Result<PendingTask<String>, AdapterError> {
+    submit("xact.tell", move || {
+        xact_tell::tell(&request, populating.as_deref(), &budget).map_err(|err| err.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +567,51 @@ mod tests {
 
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tell_fails_before_launching_for_an_unenforceable_resource() {
+        let request = xact_tell::TellRequest {
+            model: "gemma3".into(),
+            persona: None,
+            reading: None,
+            instruction: "hi".into(),
+            think: None,
+        };
+        let budget = xact_ast::ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
+        assert!(tell(request, None, budget).is_err());
+    }
+
+    /// Proves `@ TELL` genuinely goes through the same adapter as every
+    /// other verb — real lifecycle events included — not just that
+    /// `xact-tell` works in isolation (already covered by its own crate's
+    /// tests). Slow (real local model load + generation).
+    #[test]
+    fn tell_async_runs_through_the_real_adapter_with_lifecycle_events() {
+        let request = xact_tell::TellRequest {
+            model: "gemma3".into(),
+            persona: None,
+            reading: None,
+            instruction: "Reply with exactly one word: hello".into(),
+            think: None,
+        };
+
+        let mut branch = tell_async(request, None, xact_ast::ResourceBudget::default())
+            .expect("submission should be admitted");
+
+        let mut events = Vec::new();
+        let response = loop {
+            events.extend(branch.drain_events());
+            if let Some(result) = branch.try_join() {
+                break result.expect("ollama should succeed");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        events.extend(branch.drain_events());
+
+        assert!(!response.is_empty());
+        assert!(events.contains(&LifecycleEvent::Submitted), "expected a Submitted event: {events:?}");
+        assert!(events.iter().any(LifecycleEvent::is_terminal), "expected a terminal event: {events:?}");
     }
 
     /// Proves `_async` submissions are genuinely concurrent branches, not

@@ -1,11 +1,11 @@
 [package]
-name = "xact-executor"
+name = "xact-tell"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
-xact-planner = { workspace = true }
-xact-mesut = { workspace = true }
 xact-ast = { workspace = true }
-xact-tell = { workspace = true }
+xact-bank = { workspace = true }
+xact-bound = { workspace = true }
+xact-resource = { workspace = true }
