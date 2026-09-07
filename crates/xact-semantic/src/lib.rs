@@ -60,6 +60,20 @@ pub fn validate(
             let mut diagnostics = Vec::new();
             check_operand(cmd.operand.as_ref(), identity, references, &mut diagnostics);
             check_operand(cmd.destination.as_ref(), identity, references, &mut diagnostics);
+            if let Some(dependency) = &cmd.dependency {
+                if references.resolve(dependency.reference).is_none() {
+                    diagnostics.push(Diagnostic::invalid(
+                        format!(
+                            "{} does not refer to anything yet, so WHEN {} {} has nothing to depend on.",
+                            dependency.reference.as_str(),
+                            dependency.reference.as_str(),
+                            dependency.condition.as_str()
+                        ),
+                        dependency.reference_span,
+                        vec![],
+                    ));
+                }
+            }
             if !diagnostics.is_empty() {
                 return Err(diagnostics);
             }
@@ -129,6 +143,7 @@ mod tests {
             verb_span: Span::default(),
             operand,
             destination: None,
+            dependency: None,
         })
     }
 
@@ -183,5 +198,37 @@ mod tests {
             validated.establishes,
             Some(ResolvedObject::Path("~/project/README.md".into()))
         );
+    }
+
+    fn dependency_command(reference: xact_ast::ReferenceKind, condition: xact_ast::SuccessCondition) -> Command {
+        Command::Imperative(ImperativeCommand {
+            verb: Verb::Run,
+            verb_span: Span::default(),
+            operand: Some(Operand::StringArg { value: "test".into(), span: Span::default() }),
+            destination: None,
+            dependency: Some(xact_ast::DependencyClause {
+                reference,
+                reference_span: Span::default(),
+                condition,
+                condition_span: Span::default(),
+            }),
+        })
+    }
+
+    #[test]
+    fn when_that_rejected_with_no_prior_result() {
+        let identity = IdentityContext::new();
+        let references = ReferenceContext::new();
+        let cmd = dependency_command(xact_ast::ReferenceKind::That, xact_ast::SuccessCondition::Succeeds);
+        assert!(validate(cmd, &identity, &references).is_err());
+    }
+
+    #[test]
+    fn when_that_accepted_once_something_is_established() {
+        let identity = IdentityContext::new();
+        let mut references = ReferenceContext::new();
+        references.record(ResolvedObject::Text("compile".into()));
+        let cmd = dependency_command(xact_ast::ReferenceKind::That, xact_ast::SuccessCondition::Fails);
+        assert!(validate(cmd, &identity, &references).is_ok());
     }
 }

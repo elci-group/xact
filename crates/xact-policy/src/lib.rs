@@ -10,9 +10,19 @@
 //!
 //! Turning an accepted [`PolicyContext`] into actual enforcement (real
 //! resource limits, real capability gating) is the execution planner's job
-//! (spec sections 20-22) and is not implemented yet — this crate only
-//! guarantees the policy statements accumulated so far are internally
-//! consistent.
+//! (spec sections 20-22); `SPEND`/`SAVE` and `CONCURRENTLY`/`CONSECUTIVELY`
+//! are real today (Xact–Mesut Integration Phases 3/5) via
+//! `Session::resource_budget`/`schedule`. `PolicyOperator::When` (`!
+//! WHEN <condition>`, a standalone policy statement per spec section 8's
+//! original vocabulary) is still just tracked here, not enforced — it is
+//! *not* the same thing as the real `WHEN THIS/THAT SUCCEEDS`/`FAILS`
+//! dependency clause `xact-ast::DependencyClause` attaches directly to an
+//! imperative command (Xact–Mesut Integration Phase 8, section 9's
+//! concrete `£ RUN 'test' WHEN THAT succeeds` example): that one is a
+//! different grammatical position, parsed by `xact-parser` as part of the
+//! command itself and enforced by `xact-cli`/`xact-core`, not by this
+//! crate. Two different `WHEN`s exist in the language today for that
+//! reason — see `crates/xact-cli/src/main.rs`'s module docs.
 
 use std::collections::{HashMap, HashSet};
 

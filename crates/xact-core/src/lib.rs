@@ -41,6 +41,7 @@ pub struct Session {
     identity: IdentityContext,
     references: ReferenceContext,
     policy: PolicyContext,
+    last_outcome: Option<bool>,
 }
 
 impl Session {
@@ -108,6 +109,35 @@ impl Session {
     /// actually constrained, not just described.
     pub fn resource_budget(&self) -> xact_ast::ResourceBudget {
         self.policy.resource_budget()
+    }
+
+    /// Records whether the most recently completed real execution
+    /// succeeded (spec section 9; Xact–Mesut Integration Phase 8),
+    /// consulted by [`Session::dependency_satisfied`] for `WHEN
+    /// THIS/THAT SUCCEEDS`/`FAILS`. `xact-core` never executes anything
+    /// itself — a caller (`xact-cli`) reports the real result back here
+    /// once it has one.
+    ///
+    /// Xact's reference model has a single "most recent" slot for
+    /// `THIS`/`THAT`, not one per established object (spec section 11)
+    /// — this mirrors that: one session-wide slot, not a per-object
+    /// history. It reflects the outcome of whatever most recently
+    /// *actually ran*, which is not always whatever `THIS`/`THAT`'s
+    /// current value happens to be — a verb with no execution plan yet
+    /// still establishes a reference (`resolve_established` in
+    /// `xact-semantic`) without ever running anything. This is the same
+    /// flat, session-wide model `CONCURRENTLY`/`SPEND` already use, not a
+    /// gap specific to dependencies.
+    pub fn record_outcome(&mut self, success: bool) {
+        self.last_outcome = Some(success);
+    }
+
+    /// Whether `dependency`'s stated condition is satisfied by the most
+    /// recently recorded real outcome (see [`Session::record_outcome`]).
+    /// `false` — not satisfied, meaning the dependent command should be
+    /// skipped rather than run — if nothing has actually run yet.
+    pub fn dependency_satisfied(&self, dependency: &xact_ast::DependencyClause) -> bool {
+        self.last_outcome.is_some_and(|success| dependency.condition.is_satisfied_by(success))
     }
 }
 
@@ -219,5 +249,47 @@ mod tests {
             session.submit("@ TELL 'x' POPULATING THAT \"go\""),
             SessionOutcome::AgentAccepted(_)
         ));
+    }
+
+    fn when_that(condition: &str) -> String {
+        format!("£ RUN 'x' WHEN THAT {condition}")
+    }
+
+    #[test]
+    fn dependency_not_satisfied_before_anything_has_run() {
+        let session = Session::new();
+        let dependency = xact_ast::DependencyClause {
+            reference: xact_ast::ReferenceKind::That,
+            reference_span: Default::default(),
+            condition: xact_ast::SuccessCondition::Succeeds,
+            condition_span: Default::default(),
+        };
+        assert!(!session.dependency_satisfied(&dependency));
+    }
+
+    #[test]
+    fn dependency_satisfied_after_a_matching_recorded_outcome() {
+        let mut session = Session::new();
+        session.record_outcome(true);
+        let succeeds = xact_ast::DependencyClause {
+            reference: xact_ast::ReferenceKind::That,
+            reference_span: Default::default(),
+            condition: xact_ast::SuccessCondition::Succeeds,
+            condition_span: Default::default(),
+        };
+        let fails = xact_ast::DependencyClause { condition: xact_ast::SuccessCondition::Fails, ..succeeds };
+        assert!(session.dependency_satisfied(&succeeds));
+        assert!(!session.dependency_satisfied(&fails));
+
+        session.record_outcome(false);
+        assert!(!session.dependency_satisfied(&succeeds));
+        assert!(session.dependency_satisfied(&fails));
+    }
+
+    #[test]
+    fn when_that_parses_and_validates_once_something_is_established() {
+        let mut session = Session::new();
+        assert!(matches!(session.submit("£ RUN 'compile'"), SessionOutcome::Accepted(_)));
+        assert!(matches!(session.submit(&when_that("SUCCEEDS")), SessionOutcome::Accepted(_)));
     }
 }

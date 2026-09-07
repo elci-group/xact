@@ -172,6 +172,50 @@ impl Operand {
     }
 }
 
+/// `£ RUN 'test' WHEN THAT SUCCEEDS` — a dependency clause (spec section 9;
+/// Xact–Mesut Integration Phase 8): this command only actually runs once
+/// `reference`'s most recent real execution outcome satisfies `condition`.
+/// Xact represents the dependency; the executor is what checks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuccessCondition {
+    Succeeds,
+    Fails,
+}
+
+impl SuccessCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SuccessCondition::Succeeds => "SUCCEEDS",
+            SuccessCondition::Fails => "FAILS",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "SUCCEEDS" => SuccessCondition::Succeeds,
+            "FAILS" => SuccessCondition::Fails,
+            _ => return None,
+        })
+    }
+
+    /// Whether a real execution outcome of `success` satisfies this
+    /// condition.
+    pub fn is_satisfied_by(&self, success: bool) -> bool {
+        match self {
+            SuccessCondition::Succeeds => success,
+            SuccessCondition::Fails => !success,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependencyClause {
+    pub reference: ReferenceKind,
+    pub reference_span: Span,
+    pub condition: SuccessCondition,
+    pub condition_span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImperativeCommand {
     pub verb: Verb,
@@ -179,6 +223,8 @@ pub struct ImperativeCommand {
     pub operand: Option<Operand>,
     /// `COPY THAT to OUR ~/backup` — the `to` clause destination.
     pub destination: Option<Operand>,
+    /// `RUN 'test' WHEN THAT SUCCEEDS` — the `WHEN` clause dependency.
+    pub dependency: Option<DependencyClause>,
 }
 
 /// `£ THEY are "alice,bob"` — establishes the identity context that `THEIR`

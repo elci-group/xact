@@ -16,7 +16,8 @@
 //! `xact-executor`, exactly parallel to a `£` command's
 //! `xact-planner::plan` then `xact-executor`. `@ TEAM ...` is accepted as
 //! a validated intent but has no execution plan yet, same as any other
-//! unimplemented verb.
+//! unimplemented verb. `dispatch` is the one place both paths funnel
+//! through, since planning and execution are identical from here on.
 //!
 //! Scheduling (spec section 23, Xact–Mesut Integration Phase 3): with no
 //! `! CONCURRENTLY`/`! CONSECUTIVELY` stated, or under `! CONSECUTIVELY`,
@@ -46,6 +47,22 @@
 //! `xact-resource`); a run under an active budget that names an
 //! unenforceable resource fails outright rather than running unconstrained.
 //!
+//! Dependencies (spec section 9, Xact–Mesut Integration Phase 8):
+//! `£ RUN 'test' WHEN THAT SUCCEEDS` only actually plans/executes once
+//! the real outcome of whatever most recently ran satisfies the stated
+//! condition — `session.dependency_satisfied` checks this,
+//! `session.record_outcome` is how it learns each real result, and this
+//! loop is the only place that decides skip-vs-run. Under
+//! `! CONCURRENTLY`, the "most recent" thing might still be an in-flight
+//! branch: `LastResult::Pending(id)` tracks that, and `resolve_branch_now`
+//! blocks on that *specific* branch (not the others, which keep running
+//! independently) the moment a `WHEN` clause needs to know its outcome —
+//! a real wait-then-check gate, not a fabricated instant answer.
+//! Multi-branch fan-in dependencies, cancellation, and recovery
+//! constructs beyond a plain `WHEN ... FAILS` fallback are not
+//! implemented — see `MESUT_INTEGRATION.md`'s Phase 8 status for the
+//! honest boundary.
+//!
 //! `@` blocks may be typed across several lines for readability (matching
 //! spec section 9's example layout): once a line starts with `@`, the REPL
 //! keeps reading continuation lines until a blank line, then submits the
@@ -60,9 +77,27 @@ use xact_core::{Session, SessionOutcome};
 use xact_executor::{ExecutionOutcome, Pending};
 use xact_planner::PlanOutcome;
 
-/// Concurrent branches admitted under `! CONCURRENTLY` but not yet joined,
-/// paired with the description printed for `£ ...` when they were queued.
-type PendingBranches = Vec<(String, Pending)>;
+/// A concurrent branch admitted under `! CONCURRENTLY` but not yet
+/// joined, tagged with a stable id (so a later `WHEN` clause can block on
+/// *this specific* branch — see [`LastResult`]) and the description
+/// printed for `£ ...`/`@ ...` when it was queued.
+type PendingBranches = Vec<(u64, String, Pending)>;
+
+/// What `THIS`/`THAT`'s outcome currently refers to, for `WHEN` clauses
+/// (Xact–Mesut Integration Phase 8). Mirrors the language's existing
+/// single-slot `THIS`/`THAT` model (spec section 11) — one "most recent"
+/// tracked thing, not a per-object history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastResult {
+    /// The most recent real outcome is already recorded in `Session` —
+    /// either nothing has run yet, or the last thing that ran already
+    /// finished (every synchronous command finishes before the next line
+    /// is even read).
+    Resolved,
+    /// The most recent thing accepted is still running as a concurrent
+    /// branch, identified by its id in `PendingBranches`.
+    Pending(u64),
+}
 
 /// Prints any lifecycle telemetry and finished outcomes for branches
 /// since the last check, without blocking on the ones still running.
@@ -71,9 +106,11 @@ type PendingBranches = Vec<(String, Pending)>;
 /// real result travel over independent channels and can arrive in either
 /// order, so a drain only before `try_join` could have a just-arrived
 /// terminal event silently discarded along with the branch once it's
-/// removed from `pending`.
-fn drain_ready(pending: &mut PendingBranches) {
-    pending.retain_mut(|(description, branch)| {
+/// removed from `pending`. Also updates `session`'s recorded outcome
+/// whenever the branch that resolves is the one `last_result` is
+/// currently tracking.
+fn drain_ready(pending: &mut PendingBranches, session: &mut Session, last_result: &mut LastResult) {
+    pending.retain_mut(|(id, description, branch)| {
         for event in branch.drain_events() {
             print_lifecycle_event(description, &event);
         }
@@ -83,6 +120,10 @@ fn drain_ready(pending: &mut PendingBranches) {
                     print_lifecycle_event(description, &event);
                 }
                 print_outcome(Some(description), &outcome);
+                if *last_result == LastResult::Pending(*id) {
+                    session.record_outcome(outcome_succeeded(&outcome));
+                    *last_result = LastResult::Resolved;
+                }
                 false
             }
             None => true,
@@ -90,26 +131,63 @@ fn drain_ready(pending: &mut PendingBranches) {
     });
 }
 
+/// Blocks on one specific branch (identified by `id`) and records its
+/// real outcome — the `WHEN` clause gate: a dependent command must not
+/// even be planned until the branch it depends on has genuinely finished.
+/// Branches other than `id` are left running untouched. A missing `id`
+/// (should not happen — `last_result` only ever names a branch that was
+/// actually queued) is a no-op rather than a panic.
+fn resolve_branch_now(id: u64, pending: &mut PendingBranches, session: &mut Session) {
+    let Some(pos) = pending.iter().position(|(pid, _, _)| *pid == id) else {
+        return;
+    };
+    let (_, description, mut branch) = pending.remove(pos);
+    let outcome = block_until_resolved(&description, &mut branch);
+    print_outcome(Some(&description), &outcome);
+    session.record_outcome(outcome_succeeded(&outcome));
+}
+
 /// Blocks until every remaining branch has finished — used at session end
-/// so nothing started under `! CONCURRENTLY` is left unreported. Polls
-/// rather than calling `Pending::join` directly so it can keep draining
-/// lifecycle events (see `drain_ready`'s doc comment) right up to the
-/// moment the result arrives.
+/// so nothing started under `! CONCURRENTLY` is left unreported.
 fn join_all(pending: PendingBranches) {
-    for (description, mut branch) in pending {
-        let outcome = loop {
-            for event in branch.drain_events() {
-                print_lifecycle_event(&description, &event);
-            }
-            if let Some(outcome) = branch.try_join() {
-                break outcome;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        };
-        for event in branch.drain_events() {
-            print_lifecycle_event(&description, &event);
-        }
+    for (_, description, mut branch) in pending {
+        let outcome = block_until_resolved(&description, &mut branch);
         print_outcome(Some(&description), &outcome);
+    }
+}
+
+/// Polls a branch to completion, printing lifecycle events as they
+/// arrive, and returns its real outcome. Shared by [`join_all`] (every
+/// remaining branch) and [`resolve_branch_now`] (one specific branch).
+fn block_until_resolved(description: &str, branch: &mut Pending) -> ExecutionOutcome {
+    let outcome = loop {
+        for event in branch.drain_events() {
+            print_lifecycle_event(description, &event);
+        }
+        if let Some(outcome) = branch.try_join() {
+            break outcome;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    for event in branch.drain_events() {
+        print_lifecycle_event(description, &event);
+    }
+    outcome
+}
+
+/// Whether `outcome` counts as a success for `WHEN ... SUCCEEDS`/`FAILS`
+/// purposes: a `RunCompleted` uses its own real exit status (a nonzero
+/// exit is a real failure here, even though `xact-executor` itself never
+/// conflates it with `Failed`); every other non-`Failed` outcome only
+/// exists on an `Ok` path already, so it counts as success.
+fn outcome_succeeded(outcome: &ExecutionOutcome) -> bool {
+    match outcome {
+        ExecutionOutcome::RunCompleted { success, .. } => *success,
+        ExecutionOutcome::Failed { .. } => false,
+        ExecutionOutcome::BankEstablished { .. }
+        | ExecutionOutcome::Viewed { .. }
+        | ExecutionOutcome::Bounded { .. }
+        | ExecutionOutcome::Told { .. } => true,
     }
 }
 
@@ -165,6 +243,53 @@ fn print_outcome(branch: Option<&str>, outcome: &ExecutionOutcome) {
     }
 }
 
+/// Plans and dispatches `plan_outcome` — shared by `£` commands and
+/// `@ TELL` blocks, which differ only in how they got a `PlanOutcome`.
+/// Updates `session`'s recorded outcome and `last_result` for anything
+/// that actually ran (or failed to even submit); a plan that turned out
+/// `Unsupported` touches neither, since nothing executed at all.
+#[allow(clippy::too_many_arguments)]
+fn dispatch(
+    plan_outcome: PlanOutcome,
+    budget: xact_ast::ResourceBudget,
+    description: String,
+    concurrent: bool,
+    session: &mut Session,
+    pending: &mut PendingBranches,
+    next_branch_id: &mut u64,
+    last_result: &mut LastResult,
+) {
+    let plan = match plan_outcome {
+        PlanOutcome::Plan(plan) => plan,
+        PlanOutcome::Unsupported(reason) => {
+            println!("  {reason}");
+            return;
+        }
+    };
+
+    if concurrent {
+        match xact_executor::execute_concurrent(plan, budget) {
+            Ok(branch) => {
+                let id = *next_branch_id;
+                *next_branch_id += 1;
+                println!("  queued as an independent branch ({} in flight)", pending.len() + 1);
+                pending.push((id, description, branch));
+                *last_result = LastResult::Pending(id);
+            }
+            Err(outcome) => {
+                print_outcome(None, &outcome);
+                session.record_outcome(outcome_succeeded(&outcome));
+                *last_result = LastResult::Resolved;
+            }
+        }
+    } else {
+        let outcome = xact_executor::execute(plan, budget);
+        print_outcome(None, &outcome);
+        session.record_outcome(outcome_succeeded(&outcome));
+        *last_result = LastResult::Resolved;
+    }
+}
+
 fn main() {
     println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE, SEE, and RUN actually run");
     println!("Type a £ command, a ! policy statement, an @ agent block, or 'exit'.");
@@ -172,9 +297,11 @@ fn main() {
     let mut session = Session::new();
     let stdin = io::stdin();
     let mut pending: PendingBranches = Vec::new();
+    let mut next_branch_id: u64 = 0;
+    let mut last_result = LastResult::Resolved;
 
     loop {
-        drain_ready(&mut pending);
+        drain_ready(&mut pending, &mut session, &mut last_result);
 
         print!("xact> ");
         if io::stdout().flush().is_err() {
@@ -219,23 +346,40 @@ fn main() {
             SessionOutcome::Accepted(command) => {
                 let description = describe(&command);
                 println!("accepted: {description}");
-                match xact_planner::plan(&command, session.references()) {
-                    PlanOutcome::Plan(plan) => {
-                        let budget = session.resource_budget();
-                        if session.schedule() == Some(PolicyOperator::Concurrently) {
-                            match xact_executor::execute_concurrent(plan, budget) {
-                                Ok(branch) => {
-                                    println!("  queued as an independent branch ({} in flight)", pending.len() + 1);
-                                    pending.push((description, branch));
-                                }
-                                Err(outcome) => print_outcome(None, &outcome),
-                            }
-                        } else {
-                            print_outcome(None, &xact_executor::execute(plan, budget));
-                        }
+
+                let dependency = match &command {
+                    Command::Imperative(cmd) => cmd.dependency,
+                    Command::Identity(_) => None,
+                };
+
+                if let Some(dependency) = dependency {
+                    if let LastResult::Pending(id) = last_result {
+                        resolve_branch_now(id, &mut pending, &mut session);
+                        last_result = LastResult::Resolved;
                     }
-                    PlanOutcome::Unsupported(reason) => println!("  {reason}"),
+                    if !session.dependency_satisfied(&dependency) {
+                        println!(
+                            "  skipped: WHEN {} {} was not satisfied.",
+                            dependency.reference.as_str(),
+                            dependency.condition.as_str()
+                        );
+                        continue;
+                    }
                 }
+
+                let plan_outcome = xact_planner::plan(&command, session.references());
+                let budget = session.resource_budget();
+                let concurrent = session.schedule() == Some(PolicyOperator::Concurrently);
+                dispatch(
+                    plan_outcome,
+                    budget,
+                    description,
+                    concurrent,
+                    &mut session,
+                    &mut pending,
+                    &mut next_branch_id,
+                    &mut last_result,
+                );
             }
             SessionOutcome::PolicyAccepted(stmt) => {
                 println!("policy set: {}", describe_policy(&stmt));
@@ -250,23 +394,19 @@ fn main() {
             SessionOutcome::AgentAccepted(block) => {
                 let description = describe_agent(&block);
                 println!("agent intent accepted: {description}");
-                match xact_planner::plan_agent(&block, session.references()) {
-                    PlanOutcome::Plan(plan) => {
-                        let budget = session.resource_budget();
-                        if session.schedule() == Some(PolicyOperator::Concurrently) {
-                            match xact_executor::execute_concurrent(plan, budget) {
-                                Ok(branch) => {
-                                    println!("  queued as an independent branch ({} in flight)", pending.len() + 1);
-                                    pending.push((description, branch));
-                                }
-                                Err(outcome) => print_outcome(None, &outcome),
-                            }
-                        } else {
-                            print_outcome(None, &xact_executor::execute(plan, budget));
-                        }
-                    }
-                    PlanOutcome::Unsupported(reason) => println!("  {reason}"),
-                }
+                let plan_outcome = xact_planner::plan_agent(&block, session.references());
+                let budget = session.resource_budget();
+                let concurrent = session.schedule() == Some(PolicyOperator::Concurrently);
+                dispatch(
+                    plan_outcome,
+                    budget,
+                    description,
+                    concurrent,
+                    &mut session,
+                    &mut pending,
+                    &mut next_branch_id,
+                    &mut last_result,
+                );
             }
             SessionOutcome::Incomplete(diag) => print!("{diag}"),
             SessionOutcome::Rejected(diagnostics) => {
@@ -289,6 +429,9 @@ fn describe(command: &Command) -> String {
             if let Some(dest) = &cmd.destination {
                 s.push_str(" to ");
                 s.push_str(&describe_operand(dest));
+            }
+            if let Some(dep) = &cmd.dependency {
+                s.push_str(&format!(" WHEN {} {}", dep.reference.as_str(), dep.condition.as_str()));
             }
             s
         }

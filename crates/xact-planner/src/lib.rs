@@ -213,6 +213,7 @@ mod tests {
             verb_span: Span::default(),
             operand: Some(operand),
             destination: None,
+            dependency: None,
         })
     }
 
@@ -277,6 +278,7 @@ mod tests {
                 span: Span::default(),
             }),
             destination: None,
+            dependency: None,
         });
         match plan(&cmd, &references) {
             PlanOutcome::Unsupported(reason) => assert!(reason.contains("DELETE")),
@@ -295,6 +297,7 @@ mod tests {
                 span: Span::default(),
             }),
             destination: None,
+            dependency: None,
         });
         match plan(&cmd, &references) {
             PlanOutcome::Plan(ExecutionPlan::Run { command_line }) => assert_eq!(command_line, "true"),
@@ -314,6 +317,7 @@ mod tests {
                 span: Span::default(),
             }),
             destination: None,
+            dependency: None,
         });
         match plan(&cmd, &references) {
             PlanOutcome::Plan(ExecutionPlan::Run { command_line }) => assert_eq!(command_line, "echo hi"),
@@ -333,6 +337,7 @@ mod tests {
                 span: Span::default(),
             }),
             destination: None,
+            dependency: None,
         });
         let home = std::env::var("HOME").unwrap();
         match plan(&cmd, &references) {
@@ -360,6 +365,7 @@ mod tests {
                 path: "/tmp/bundle.txt".into(),
                 span: Span::default(),
             }),
+            dependency: None,
         });
         match plan(&cmd, &references) {
             PlanOutcome::Plan(ExecutionPlan::Bound { source, destination }) => {
@@ -378,6 +384,7 @@ mod tests {
             verb_span: Span::default(),
             operand: None,
             destination: None,
+            dependency: None,
         });
         match plan(&cmd, &references) {
             PlanOutcome::Unsupported(reason) => assert!(reason.contains("BOUND")),
@@ -391,6 +398,7 @@ mod tests {
             verb_span: Span::default(),
             operand: Some(operand),
             destination: None,
+            dependency: None,
         })
     }
 

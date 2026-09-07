@@ -154,44 +154,165 @@ fn parse_identity(tokens: &[Token], they_idx: usize, they_span: Span) -> ParseOu
     }
 }
 
+fn dependency_reference_expected() -> Vec<String> {
+    ReferenceKind::ALL.iter().map(|k| k.as_str().to_string()).collect()
+}
+
+fn dependency_condition_expected() -> Vec<String> {
+    vec!["SUCCEEDS".to_string(), "FAILS".to_string()]
+}
+
 fn parse_imperative(tokens: &[Token], idx: usize, verb: Verb, verb_span: Span) -> ParseOutcome {
     let (operand, next_idx) = match parse_operand(tokens, idx, verb.as_str()) {
         Ok(pair) => pair,
         Err(outcome) => return outcome,
     };
+    parse_after_operand(tokens, next_idx, verb, verb_span, operand)
+}
 
-    let after = &tokens[next_idx];
-    match &after.kind {
+fn parse_after_operand(
+    tokens: &[Token],
+    idx: usize,
+    verb: Verb,
+    verb_span: Span,
+    operand: Operand,
+) -> ParseOutcome {
+    let tok = &tokens[idx];
+    match &tok.kind {
         TokenKind::Eof => ParseOutcome::Complete(Line::Command(Command::Imperative(ImperativeCommand {
             verb,
             verb_span,
             operand: Some(operand),
             destination: None,
+            dependency: None,
         }))),
         TokenKind::Word(w) if w.eq_ignore_ascii_case("to") => {
-            let dest_idx = next_idx + 1;
+            let dest_idx = idx + 1;
             let (destination, end_idx) = match parse_operand(tokens, dest_idx, "'to'") {
                 Ok(pair) => pair,
                 Err(outcome) => return outcome,
             };
-            let trailing = &tokens[end_idx];
-            if !matches!(trailing.kind, TokenKind::Eof) {
-                return Diagnostic::invalid("Unexpected input after destination.", trailing.span, vec![]).into_invalid();
-            }
-            ParseOutcome::Complete(Line::Command(Command::Imperative(ImperativeCommand {
-                verb,
-                verb_span,
-                operand: Some(operand),
-                destination: Some(destination),
-            })))
+            parse_after_destination(tokens, end_idx, verb, verb_span, operand, destination)
+        }
+        TokenKind::Word(w) if w.eq_ignore_ascii_case("when") => {
+            finish_with_dependency(tokens, idx + 1, verb, verb_span, operand, None)
         }
         _ => Diagnostic::invalid(
-            "Unexpected input; expected end of command or 'to'.",
-            after.span,
-            vec!["to".into()],
+            "Unexpected input; expected end of command, 'to', or 'WHEN'.",
+            tok.span,
+            vec!["to".into(), "WHEN".into()],
         )
         .into_invalid(),
     }
+}
+
+fn parse_after_destination(
+    tokens: &[Token],
+    idx: usize,
+    verb: Verb,
+    verb_span: Span,
+    operand: Operand,
+    destination: Operand,
+) -> ParseOutcome {
+    let tok = &tokens[idx];
+    match &tok.kind {
+        TokenKind::Eof => ParseOutcome::Complete(Line::Command(Command::Imperative(ImperativeCommand {
+            verb,
+            verb_span,
+            operand: Some(operand),
+            destination: Some(destination),
+            dependency: None,
+        }))),
+        TokenKind::Word(w) if w.eq_ignore_ascii_case("when") => {
+            finish_with_dependency(tokens, idx + 1, verb, verb_span, operand, Some(destination))
+        }
+        _ => Diagnostic::invalid(
+            "Unexpected input after destination; expected end of command or 'WHEN'.",
+            tok.span,
+            vec!["WHEN".into()],
+        )
+        .into_invalid(),
+    }
+}
+
+/// Parses `THIS`/`THAT SUCCEEDS`/`FAILS` starting right after `WHEN` and, on
+/// success, assembles the whole command (spec section 9's dependency
+/// clause — Xact–Mesut Integration Phase 8).
+fn finish_with_dependency(
+    tokens: &[Token],
+    idx: usize,
+    verb: Verb,
+    verb_span: Span,
+    operand: Operand,
+    destination: Option<Operand>,
+) -> ParseOutcome {
+    let ref_tok = &tokens[idx];
+    let (reference, reference_span) = match &ref_tok.kind {
+        TokenKind::Eof => {
+            return Diagnostic::incomplete("WHEN requires THIS or THAT.", ref_tok.span, dependency_reference_expected())
+                .into_incomplete()
+        }
+        TokenKind::Word(w) => match ReferenceKind::from_str(&w.to_uppercase()) {
+            Some(kind) => (kind, ref_tok.span),
+            None => {
+                return Diagnostic::invalid(
+                    format!("Unknown reference '{w}' after WHEN."),
+                    ref_tok.span,
+                    dependency_reference_expected(),
+                )
+                .into_invalid()
+            }
+        },
+        _ => {
+            return Diagnostic::invalid("WHEN requires THIS or THAT.", ref_tok.span, dependency_reference_expected())
+                .into_invalid()
+        }
+    };
+
+    let cond_idx = idx + 1;
+    let cond_tok = &tokens[cond_idx];
+    let (condition, condition_span) = match &cond_tok.kind {
+        TokenKind::Eof => {
+            return Diagnostic::incomplete(
+                format!("WHEN {} requires SUCCEEDS or FAILS.", reference.as_str()),
+                cond_tok.span,
+                dependency_condition_expected(),
+            )
+            .into_incomplete()
+        }
+        TokenKind::Word(w) => match xact_ast::SuccessCondition::from_str(&w.to_uppercase()) {
+            Some(condition) => (condition, cond_tok.span),
+            None => {
+                return Diagnostic::invalid(
+                    format!("Unknown condition '{w}' after WHEN {}.", reference.as_str()),
+                    cond_tok.span,
+                    dependency_condition_expected(),
+                )
+                .into_invalid()
+            }
+        },
+        _ => {
+            return Diagnostic::invalid(
+                format!("WHEN {} requires SUCCEEDS or FAILS.", reference.as_str()),
+                cond_tok.span,
+                dependency_condition_expected(),
+            )
+            .into_invalid()
+        }
+    };
+
+    let trailing = &tokens[cond_idx + 1];
+    if !matches!(trailing.kind, TokenKind::Eof) {
+        return Diagnostic::invalid("Unexpected input after WHEN clause.", trailing.span, vec![]).into_invalid();
+    }
+
+    ParseOutcome::Complete(Line::Command(Command::Imperative(ImperativeCommand {
+        verb,
+        verb_span,
+        operand: Some(operand),
+        destination,
+        dependency: Some(xact_ast::DependencyClause { reference, reference_span, condition, condition_span }),
+    })))
 }
 
 /// Parses one operand (an ownership+path pair, a `THIS`/`THAT` reference, or
@@ -758,6 +879,76 @@ mod tests {
         match cmd.operand {
             Some(Operand::StringArg { value, .. }) => assert_eq!(value, "chrome"),
             other => panic!("expected string operand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_with_when_clause_after_operand() {
+        let cmd = match command(parse_line("£ RUN 'test' WHEN THAT SUCCEEDS")) {
+            Command::Imperative(cmd) => cmd,
+            other => panic!("expected imperative, got {other:?}"),
+        };
+        match cmd.dependency {
+            Some(dep) => {
+                assert_eq!(dep.reference, Ref::That);
+                assert_eq!(dep.condition, xact_ast::SuccessCondition::Succeeds);
+            }
+            None => panic!("expected a dependency clause"),
+        }
+    }
+
+    #[test]
+    fn run_with_when_fails_clause() {
+        let cmd = match command(parse_line("£ RUN 'cleanup' WHEN THIS FAILS")) {
+            Command::Imperative(cmd) => cmd,
+            other => panic!("expected imperative, got {other:?}"),
+        };
+        match cmd.dependency {
+            Some(dep) => {
+                assert_eq!(dep.reference, Ref::This);
+                assert_eq!(dep.condition, xact_ast::SuccessCondition::Fails);
+            }
+            None => panic!("expected a dependency clause"),
+        }
+    }
+
+    #[test]
+    fn when_clause_after_destination() {
+        let cmd = match command(parse_line("£ COPY THAT to OUR ~/backup WHEN THAT SUCCEEDS")) {
+            Command::Imperative(cmd) => cmd,
+            other => panic!("expected imperative, got {other:?}"),
+        };
+        assert!(cmd.destination.is_some());
+        assert!(cmd.dependency.is_some());
+    }
+
+    #[test]
+    fn when_clause_incomplete_without_reference() {
+        match parse_line("£ RUN 'test' WHEN") {
+            ParseOutcome::Incomplete(diag) => {
+                assert!(diag.expected.contains(&"THIS".to_string()));
+                assert!(diag.expected.contains(&"THAT".to_string()));
+            }
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn when_clause_incomplete_without_condition() {
+        match parse_line("£ RUN 'test' WHEN THAT") {
+            ParseOutcome::Incomplete(diag) => {
+                assert!(diag.expected.contains(&"SUCCEEDS".to_string()));
+                assert!(diag.expected.contains(&"FAILS".to_string()));
+            }
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn when_clause_rejects_unknown_condition() {
+        match parse_line("£ RUN 'test' WHEN THAT MAYBE") {
+            ParseOutcome::Invalid(_) => {}
+            other => panic!("expected invalid, got {other:?}"),
         }
     }
 

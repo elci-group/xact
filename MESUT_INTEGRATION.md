@@ -137,6 +137,59 @@
 > "TEAM -> Xact orchestration runtime") has no execution plan yet, reported the same way any other
 > not-yet-implemented verb is — a real scope boundary, not an oversight. Full test suite green. See
 > `crates/xact-tell/src/lib.rs` module docs for the full detail.
+>
+> **Phase 8 — partially done: dependency graphs are real; cancellation, recovery beyond a plain
+> fallback, and multi-branch aggregation are not.** Directive: "Introduce dependency graphs,
+> cancellation trees, aggregation, recovery, and richer scheduling" — five distinct sub-features,
+> unlike every prior phase's single deliverable; this phase ships the one with a concrete spec
+> example (section 9: `£ RUN 'test' WHEN THAT succeeds`) fully real and tested, and draws an honest
+> line under the rest rather than faking them.
+>
+> Investigated first whether Mesut has real DAG-execution machinery before designing anything (same
+> discipline as every prior phase): it does — `MesuT::execute_pipeline`/`Pipeline`/`PipelineStage`
+> (`with_dependency`, topological `execution_order`, bounded-parallelism execution, real failure/
+> cancellation propagation via a shared `CancellationToken`) — real and functional, confirmed by
+> reading `mesut-runtime/src/pipeline.rs` and its example. Deliberately **not** used here: Xact's
+> dependency chains are always exactly one hop (a command depends on the immediately-preceding
+> `THIS`/`THAT`'s real outcome — the same single-slot model `CONCURRENTLY`/`SPEND` already use, not
+> a per-object history), so there is no fan-out/fan-in DAG shape in the language today that would
+> exercise Mesut's parallel scheduler differently from a direct wait-then-check gate. Building a
+> `mesut::Pipeline` for a strictly linear chain would reimplement what the gate already does, with
+> no behavioural difference — composing it becomes the right call if Xact ever gains real
+> multi-source dependencies (fan-in), not before.
+>
+> `xact-ast::DependencyClause` (`WHEN THIS/THAT SUCCEEDS/FAILS`) attaches to an imperative command
+> exactly at the grammatical position the directive's own example uses — a new clause, not a reuse
+> of the *original* spec section 8's separate, standalone `! WHEN <condition>` policy statement
+> (still just tracked, not enforced, unchanged by this phase — see `xact-policy`'s module docs for
+> why these are deliberately two different things). `xact-core::Session` gained
+> `record_outcome`/`dependency_satisfied`: a single session-wide "did the most recent real
+> execution succeed" slot, updated by `xact-cli` after every real outcome. Under `!
+> CONSECUTIVELY`/no schedule stated, checking a dependency needs no new mechanism (the referenced
+> command already finished synchronously by construction). Under `! CONCURRENTLY`, the referenced
+> branch may still be in flight: `xact-cli` tracks which pending branch `THIS`/`THAT` currently
+> means and, when a `WHEN` clause needs an answer, blocks specifically on *that* branch (other,
+> unrelated branches keep running independently) before deciding — a real wait-then-check gate, not
+> an instant fabricated answer. A `WHEN ... FAILS` clause after a skipped (not run) command still
+> checks the last thing that *actually ran*, giving a minimal, real fallback/recovery construct
+> (section 23) for free.
+>
+> Verified live: the exact `compile`/`test`/`package` chain from section 9's example — a failing
+> `compile` correctly skips every downstream `WHEN ... SUCCEEDS` step (section 22: "if A fails then
+> B and C SHALL NOT execute"); under `! CONCURRENTLY`, a `WHEN THAT SUCCEEDS` command measurably
+> blocks (real wall-clock, ~1s) on a still-running prior branch before either running or skipping;
+> a `WHEN ... FAILS` fallback after a skip still fires correctly against the real prior failure.
+> Full test suite green, zero regressions.
+>
+> **Not implemented, honestly**: real `CTRL-C` cancellation propagation (section 12) — no signal
+> handler exists anywhere in `xact-cli`, and none of the `Work` job closures check the
+> `CancellationToken` they're given; killing a real running child process on interrupt is real,
+> achievable follow-up work, not attempted here. Multi-branch aggregation (section 22's concurrent
+> `A/B/C -> aggregate` case — a dependency fanning in from more than one branch) is not implemented;
+> today's single-slot `THIS`/`THAT` model has no representation for "wait on more than one prior
+> thing." `retry`/`cleanup`/`rollback`/`ignore` (section 23) beyond the minimal `WHEN ... FAILS`
+> fallback shown above are not implemented. These are real scope boundaries, stated plainly rather
+> than glossed over — the natural next increments if this work continues.
 
 ---
 
