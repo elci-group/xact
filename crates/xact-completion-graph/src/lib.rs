@@ -150,12 +150,21 @@ mod tests {
 
     #[test]
     fn does_not_resolve_binaries_for_a_path_taking_verb() {
-        // SEE has only a filesystem_path resolver — real path entries
-        // under /bin (e.g. /bin/ls) are expected, but a bare binary name
-        // with no path (what the installed_binary resolver would produce)
-        // must never appear.
-        let suggestions = dynamic_complete("£ SEE MY /bin/l");
-        assert!(suggestions.iter().any(|s| s.starts_with("/bin/l")), "{suggestions:?}");
-        assert!(!suggestions.iter().any(|s| s == "ls"), "{suggestions:?}");
+        // SEE has only a filesystem_path resolver (confirmed structurally
+        // by xact-resolve's own resolvers_for_see_is_filesystem_path_only
+        // test) — a small, controlled fixture directory proves it
+        // resolves real *paths*, not bare binary names, without risking a
+        // real, potentially huge system directory (like /bin -> /usr/bin,
+        // whose ~2600 real entries can legitimately exceed xact-resolve's
+        // real gls timeout).
+        let dir = std::env::temp_dir().join(format!("xact-completion-graph-see-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("listing.txt"), b"x").unwrap();
+
+        let input = format!("£ SEE MY {}/lis", dir.display());
+        let suggestions = dynamic_complete(&input);
+        assert_eq!(suggestions, vec![format!("{}/listing.txt", dir.display())]);
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

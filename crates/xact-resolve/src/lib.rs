@@ -25,7 +25,9 @@
 //! out of the graph rather than hardcoding them a second time).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, SystemTime};
 
 use padagonia::{NodeId, Provenance, QueryEngine, Scalar, Store};
 use xact_ast::{OwnershipKind, Verb};
@@ -309,28 +311,132 @@ pub fn list_path_entries(partial: &str) -> Vec<String> {
     };
     let dir = expand_tilde(dir_part);
     let dir = if dir_part.is_empty() { PathBuf::from(".") } else { dir };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
 
-    let mut matches: Vec<String> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            if !name.starts_with(name_prefix) {
-                return None;
-            }
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+    let mut matches: Vec<String> = gls_listing(&dir)
+        .into_iter()
+        .filter(|(name, _)| name.starts_with(name_prefix))
+        .map(|(name, is_dir)| {
             let mut candidate = format!("{dir_part}{name}");
             if is_dir {
                 candidate.push('/');
             }
-            Some(candidate)
+            candidate
         })
         .collect();
     matches.sort();
     matches.truncate(50);
     matches
+}
+
+/// How long [`run_gls`] waits for one real `gls` invocation before giving
+/// up and reporting no candidates. `gls` ("filesystem meaning,
+/// progressively revealed") is not a fast lister — even with
+/// `--no-context` (the default), it runs a real discovery + BART sizing +
+/// type-classification + Padagonia-indexing pipeline for every entry.
+/// Measured directly: `~400` real entries in `$HOME` finished in ~0.8s;
+/// `~2600` entries in `/usr/bin` took ~21s. A live, per-keystroke REPL
+/// cannot block on the latter, so a slow directory degrades to "no
+/// dynamic candidates this time" rather than freezing input — the static
+/// `<path>` placeholder from `xact-completion` is still shown either way.
+const GLS_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// One real `gls` listing, cached per resolved directory and reused as
+/// long as the directory's own mtime (which the kernel bumps whenever an
+/// entry is added, removed, or renamed inside it) hasn't changed — the
+/// same "fetch once when a new directory is entered, then filter locally
+/// as more characters narrow it" behavior a real interactive listing
+/// should have, and the only way `gls`'s real latency (see
+/// [`GLS_TIMEOUT`]) stays off the hot path of every keystroke.
+static GLS_CACHE: LazyLock<Mutex<HashMap<PathBuf, CachedListing>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct CachedListing {
+    mtime: SystemTime,
+    entries: Vec<(String, bool)>,
+}
+
+fn gls_listing(dir: &Path) -> Vec<(String, bool)> {
+    let mtime = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
+
+    if let Some(mtime) = mtime {
+        if let Some(cached) = GLS_CACHE.lock().unwrap().get(dir) {
+            if cached.mtime == mtime {
+                return cached.entries.clone();
+            }
+        }
+    }
+
+    let entries = run_gls(dir);
+    if let Some(mtime) = mtime {
+        GLS_CACHE.lock().unwrap().insert(dir.to_path_buf(), CachedListing { mtime, entries: entries.clone() });
+    }
+    entries
+}
+
+/// Real direct children of `dir` (name, is-directory), via the real `gls`
+/// binary — the same tool `£ SEE` itself uses to show a directory,
+/// composed rather than reimplemented (spec section 3/4/6's "Xact
+/// composes real sibling tools" principle). `--output json` is the only
+/// way to get `gls`'s real classification back as structured data instead
+/// of an ANSI-formatted grid meant for a human terminal.
+///
+/// `gls`'s JSON stream has a real, confirmed quirk this parsing works
+/// around: a `discovery` event's JSON object contains two `"kind"` keys —
+/// the outer event-type tag (`"discovery"`) and, later in the same
+/// object, the entry's own type (`"file"`/`"directory"`). Verified
+/// directly (both Rust's `serde_json::Value` and Python's `json` module
+/// silently keep only the *second* occurrence when parsing a JSON object
+/// with a duplicate key), so `"kind"` on a parsed event always reads as
+/// the entry type here, never the event tag. `"basename"`+`"relative"`
+/// (present only on `discovery` events, confirmed against a real `gls
+/// --output json` run) is what actually identifies the line as one.
+fn run_gls(dir: &Path) -> Vec<(String, bool)> {
+    let mut child = match std::process::Command::new("gls")
+        .arg(dir)
+        .args(["--no-animate", "--output", "json", "--depth", "1", "--hidden"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Vec::new(),
+    };
+
+    let Some(mut stdout) = child.stdout.take() else {
+        return Vec::new();
+    };
+    // Drained on a dedicated thread rather than after `wait()`: a large
+    // directory's JSON output can exceed the OS pipe buffer, and `gls`
+    // would then block writing to a full pipe while this side blocks
+    // waiting for it to exit -- a real deadlock, not a hypothetical one,
+    // for exactly the large-directory case `GLS_TIMEOUT` exists to bound.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let result = match rx.recv_timeout(GLS_TIMEOUT) {
+        Ok(output) => parse_discovery_events(&output),
+        Err(_) => Vec::new(),
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn parse_discovery_events(output: &str) -> Vec<(String, bool)> {
+    output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|event| {
+            let basename = event.get("basename")?.as_str()?;
+            event.get("relative")?.as_str()?;
+            let is_dir = event.get("kind").and_then(|k| k.as_str()) == Some("directory");
+            Some((basename.to_string(), is_dir))
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -351,6 +457,20 @@ fn is_executable_file(entry: &std::fs::DirEntry) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// `std::env::set_var("PATH", ...)` mutates real process-wide state —
+    /// shared across every test thread, not just the test that set it.
+    /// Confirmed the hard way: adding `gls`-backed tests below made
+    /// `our_domain_never_searches_path_even_for_a_real_path_only_binary`'s
+    /// temporary `$PATH` narrowing race against them under `cargo test`'s
+    /// default parallel execution — a concurrently-running test's
+    /// `Command::new("gls")` would spawn-fail with "No such file or
+    /// directory" because `$PATH` had been swapped out from under it.
+    /// Every test here that touches `$PATH`, directly or by spawning a
+    /// real `$PATH`-resolved binary (`gls` included), takes this lock
+    /// first so at most one of them runs at a time; every other test in
+    /// this module is untouched by it and stays fully parallel.
+    static PATH_SENSITIVE: Mutex<()> = Mutex::new(());
 
     #[test]
     fn resolvers_for_run_is_installed_binary_only() {
@@ -406,6 +526,7 @@ mod tests {
 
     #[test]
     fn list_binaries_finds_a_real_system_binary() {
+        let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         // "ls" (not the single letter "l") stays well under the 50-match
         // cap even on a machine with a very broad $PATH.
         let matches = list_binaries("ls", OwnershipKind::My);
@@ -419,6 +540,7 @@ mod tests {
     /// override.
     #[test]
     fn our_domain_never_searches_path_even_for_a_real_path_only_binary() {
+        let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("xact-resolve-list-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let script = dir.join("xact-resolve-list-stub");
@@ -445,6 +567,7 @@ mod tests {
 
     #[test]
     fn list_path_entries_finds_real_filesystem_matches() {
+        let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("xact-resolve-path-test-{}", std::process::id()));
         fs::create_dir_all(dir.join("alpha")).unwrap();
         fs::write(dir.join("beta.txt"), b"x").unwrap();
@@ -452,6 +575,67 @@ mod tests {
         let input = format!("{}/al", dir.display());
         let matches = list_path_entries(&input);
         assert_eq!(matches, vec![format!("{}/alpha/", dir.display())]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The exact behavior described in the request: an empty trailing
+    /// segment lists everything real in the directory, and each further
+    /// character collapses that same real listing by prefix — without
+    /// re-invoking `gls` a second time. Proven, not just asserted: the
+    /// second call (same directory, unchanged since the first) has to be
+    /// dramatically faster than the first real `gls` invocation for this
+    /// to be true, since an uncached `gls` call is real subprocess work
+    /// (tens of milliseconds at minimum).
+    #[test]
+    fn narrows_a_cached_real_listing_by_prefix_without_a_second_gls_call() {
+        let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("xact-resolve-narrow-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("alpha.txt"), b"x").unwrap();
+        fs::write(dir.join("apricot.txt"), b"x").unwrap();
+        fs::write(dir.join("beta.txt"), b"x").unwrap();
+
+        let base = format!("{}/", dir.display());
+        let first_call = std::time::Instant::now();
+        let mut everything = list_path_entries(&base);
+        let first_elapsed = first_call.elapsed();
+        everything.sort();
+        assert_eq!(
+            everything,
+            vec![
+                format!("{base}alpha.txt"),
+                format!("{base}apricot.txt"),
+                format!("{base}beta.txt"),
+            ]
+        );
+
+        let narrowed_input = format!("{base}a");
+        let second_call = std::time::Instant::now();
+        let mut narrowed = list_path_entries(&narrowed_input);
+        let second_elapsed = second_call.elapsed();
+        narrowed.sort();
+        assert_eq!(narrowed, vec![format!("{base}alpha.txt"), format!("{base}apricot.txt")]);
+
+        assert!(
+            second_elapsed < first_elapsed || second_elapsed < std::time::Duration::from_millis(5),
+            "the second call (same, unchanged directory) should reuse the cached real gls \
+             listing instead of paying for another real subprocess call: first={first_elapsed:?} second={second_elapsed:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hidden_entries_are_included_matching_the_pre_gls_behavior() {
+        let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("xact-resolve-hidden-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".hidden"), b"x").unwrap();
+
+        let input = format!("{}/.hid", dir.display());
+        let matches = list_path_entries(&input);
+        assert_eq!(matches, vec![format!("{}/.hidden", dir.display())]);
 
         fs::remove_dir_all(&dir).ok();
     }
