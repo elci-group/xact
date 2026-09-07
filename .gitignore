@@ -1,1 +1,5 @@
 /target
+
+# lwoodz run artifacts (audit log, SPDX manifest cache) — regenerated per
+# analysis run, not source. lwoodz.toml itself is tracked.
+/.lwoodz/
