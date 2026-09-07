@@ -93,8 +93,8 @@ pub fn execute(plan: ExecutionPlan, budget: ResourceBudget) -> ExecutionOutcome 
             view_outcome(path.clone(), "gls", xact_mesut::view_directory(path))
         }
         ExecutionPlan::ViewFile { path } => view_outcome(path.clone(), "bat", xact_mesut::view_file(path)),
-        ExecutionPlan::Run { command_line } => {
-            run_outcome(command_line.clone(), xact_mesut::run_process(command_line, budget))
+        ExecutionPlan::Run { command_line, domain } => {
+            run_outcome(command_line.clone(), xact_mesut::run_process(command_line, domain, budget))
         }
         ExecutionPlan::Bound { source, destination } => bound_outcome(
             source.clone(),
@@ -128,9 +128,11 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
         ExecutionPlan::ViewFile { path } => xact_mesut::view_file_async(path.clone())
             .map(|task| Pending(PendingKind::View { path, tool: "bat", task }))
             .map_err(submission_failed),
-        ExecutionPlan::Run { command_line } => xact_mesut::run_process_async(command_line.clone(), budget)
-            .map(|task| Pending(PendingKind::Run { command_line, task }))
-            .map_err(submission_failed),
+        ExecutionPlan::Run { command_line, domain } => {
+            xact_mesut::run_process_async(command_line.clone(), domain, budget)
+                .map(|task| Pending(PendingKind::Run { command_line, task }))
+                .map_err(submission_failed)
+        }
         ExecutionPlan::Bound { source, destination } => {
             xact_mesut::bound_aggregate_async(source.clone(), destination.clone(), budget)
                 .map(|task| Pending(PendingKind::Bound { source, destination, task }))
@@ -309,7 +311,7 @@ mod tests {
     #[test]
     fn run_plan_reports_success() {
         let outcome = execute(
-            ExecutionPlan::Run { command_line: "true".into() },
+            ExecutionPlan::Run { command_line: "true".into(), domain: xact_ast::OwnershipKind::My },
             ResourceBudget::default(),
         );
         assert_eq!(
@@ -326,7 +328,7 @@ mod tests {
     #[test]
     fn run_plan_reports_nonzero_exit_as_completed_not_failed() {
         let outcome = execute(
-            ExecutionPlan::Run { command_line: "false".into() },
+            ExecutionPlan::Run { command_line: "false".into(), domain: xact_ast::OwnershipKind::My },
             ResourceBudget::default(),
         );
         assert_eq!(
@@ -343,7 +345,7 @@ mod tests {
     #[test]
     fn run_plan_reports_missing_binary_as_failed() {
         let outcome = execute(
-            ExecutionPlan::Run { command_line: "xact-definitely-not-a-real-binary".into() },
+            ExecutionPlan::Run { command_line: "xact-definitely-not-a-real-binary".into(), domain: xact_ast::OwnershipKind::My },
             ResourceBudget::default(),
         );
         assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
@@ -352,7 +354,7 @@ mod tests {
     #[test]
     fn run_plan_under_a_resource_budget_is_still_constrained_for_real() {
         let budget = ResourceBudget { cpu_percent: Some(50), ..Default::default() };
-        let outcome = execute(ExecutionPlan::Run { command_line: "true".into() }, budget);
+        let outcome = execute(ExecutionPlan::Run { command_line: "true".into(), domain: xact_ast::OwnershipKind::My }, budget);
         assert_eq!(
             outcome,
             ExecutionOutcome::RunCompleted { command_line: "true".into(), success: true, code: Some(0), signal: None }
@@ -362,7 +364,7 @@ mod tests {
     #[test]
     fn run_plan_fails_before_launching_for_an_unenforceable_resource() {
         let budget = ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
-        let outcome = execute(ExecutionPlan::Run { command_line: "true".into() }, budget);
+        let outcome = execute(ExecutionPlan::Run { command_line: "true".into(), domain: xact_ast::OwnershipKind::My }, budget);
         assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
     }
 
@@ -418,7 +420,7 @@ mod tests {
 
         let branches: Vec<Pending> = (0..3)
             .map(|_| {
-                execute_concurrent(ExecutionPlan::Run { command_line: "sleep 1".into() }, ResourceBudget::default())
+                execute_concurrent(ExecutionPlan::Run { command_line: "sleep 1".into(), domain: xact_ast::OwnershipKind::My }, ResourceBudget::default())
                     .unwrap_or_else(|outcome| panic!("submission should be admitted: {outcome:?}"))
             })
             .collect();

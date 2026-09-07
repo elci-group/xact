@@ -366,8 +366,12 @@ fn submit<T: Send + 'static>(
 /// path), constrained by `budget` (spec section 22, Xact–Mesut
 /// Integration Phase 5). `xact-process` still does the actual launching
 /// and, via `xact-resource`, the actual enforcement.
-pub fn run_process(command_line: String, budget: xact_ast::ResourceBudget) -> Result<ProcessOutcome, AdapterError> {
-    run_process_async(command_line, budget)?.join()
+pub fn run_process(
+    command_line: String,
+    domain: xact_ast::OwnershipKind,
+    budget: xact_ast::ResourceBudget,
+) -> Result<ProcessOutcome, AdapterError> {
+    run_process_async(command_line, domain, budget)?.join()
 }
 
 /// Same as [`run_process`], but returns immediately as an independent
@@ -375,10 +379,11 @@ pub fn run_process(command_line: String, budget: xact_ast::ResourceBudget) -> Re
 /// process to exit.
 pub fn run_process_async(
     command_line: String,
+    domain: xact_ast::OwnershipKind,
     budget: xact_ast::ResourceBudget,
 ) -> Result<PendingTask<ProcessOutcome>, AdapterError> {
     submit("xact.run", move || {
-        xact_process::run(&command_line, &budget)
+        xact_process::run(&command_line, domain, &budget)
             .map(|status| ProcessOutcome {
                 success: status.success(),
                 code: status.code(),
@@ -498,33 +503,33 @@ mod tests {
 
     #[test]
     fn run_process_reports_success() {
-        let outcome = run_process("true".into(), xact_ast::ResourceBudget::default()).expect("true should launch");
+        let outcome = run_process("true".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("true should launch");
         assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0), signal: None });
     }
 
     #[test]
     fn run_process_reports_nonzero_exit_not_an_error() {
-        let outcome = run_process("false".into(), xact_ast::ResourceBudget::default()).expect("false should launch");
+        let outcome = run_process("false".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("false should launch");
         assert_eq!(outcome, ProcessOutcome { success: false, code: Some(1), signal: None });
     }
 
     #[test]
     fn run_process_reports_missing_binary_as_an_error() {
-        let result = run_process("xact-definitely-not-a-real-binary".into(), xact_ast::ResourceBudget::default());
+        let result = run_process("xact-definitely-not-a-real-binary".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default());
         assert!(result.is_err());
     }
 
     #[test]
     fn run_process_applies_a_real_resource_budget() {
         let budget = xact_ast::ResourceBudget { cpu_percent: Some(50), ..Default::default() };
-        let outcome = run_process("true".into(), budget).expect("true should launch under a real cgroup cap");
+        let outcome = run_process("true".into(), xact_ast::OwnershipKind::My, budget).expect("true should launch under a real cgroup cap");
         assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0), signal: None });
     }
 
     #[test]
     fn run_process_fails_before_launching_for_an_unenforceable_resource() {
         let budget = xact_ast::ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
-        assert!(run_process("true".into(), budget).is_err());
+        assert!(run_process("true".into(), xact_ast::OwnershipKind::My, budget).is_err());
     }
 
     #[test]
@@ -631,7 +636,7 @@ mod tests {
         let start = std::time::Instant::now();
 
         let branches: Vec<_> = (0..3)
-            .map(|_| run_process_async("sleep 1".into(), xact_ast::ResourceBudget::default()).expect("submission should be admitted"))
+            .map(|_| run_process_async("sleep 1".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("submission should be admitted"))
             .collect();
 
         for branch in branches {
@@ -648,7 +653,7 @@ mod tests {
 
     #[test]
     fn try_join_reports_none_while_still_running_then_some_once_done() {
-        let mut branch = run_process_async("sleep 1".into(), xact_ast::ResourceBudget::default()).expect("submission should be admitted");
+        let mut branch = run_process_async("sleep 1".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("submission should be admitted");
 
         assert!(branch.try_join().is_none(), "should still be running immediately after submission");
 
@@ -661,7 +666,7 @@ mod tests {
     /// one terminal event (`Completed` here, since `true` succeeds).
     #[test]
     fn drain_events_reports_real_lifecycle_including_a_terminal_event() {
-        let mut branch = run_process_async("true".into(), xact_ast::ResourceBudget::default()).expect("submission should be admitted");
+        let mut branch = run_process_async("true".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("submission should be admitted");
 
         // The result (via try_join) and the terminal lifecycle event are
         // delivered through independent channels and can arrive in either

@@ -28,7 +28,7 @@
 
 use std::path::PathBuf;
 
-use xact_ast::{AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Command, Operand};
+use xact_ast::{AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Command, Operand, OwnershipKind};
 use xact_reference::{ReferenceContext, ResolvedObject};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +40,14 @@ pub enum ExecutionPlan {
     /// `SEE` on a file -> the `bat` tool.
     ViewFile { path: PathBuf },
     /// `RUN` -> native process execution (spec section 21: no ELci tool
-    /// owns this).
-    Run { command_line: String },
+    /// owns this). `domain` is the ownership the program's binary is
+    /// resolved under: `MY` (explicit, or the default when the operand
+    /// states none) means the user's own `$PATH`; `OUR` means Xact's
+    /// well-known shared system binary directories, tried first for an
+    /// explicit `OUR` and as a fallback when `MY`'s `$PATH` search finds
+    /// nothing (spec section 10 — real behavioral meaning for `RUN`
+    /// specifically, not just grammar).
+    Run { command_line: String, domain: OwnershipKind },
     /// `BOUND` -> the `bound` tool (spec sections 4, 12, 21). `destination`
     /// is `bound`'s own `--out` file; `None` means `bound`'s clipboard
     /// default applies.
@@ -111,7 +117,9 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
                 return PlanOutcome::Unsupported("RUN requires a program to run.".into());
             };
             match resolve_path(operand, references) {
-                Some(command_line) => PlanOutcome::Plan(ExecutionPlan::Run { command_line }),
+                Some(command_line) => {
+                    PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain: ownership_domain(operand) })
+                }
                 None => PlanOutcome::Unsupported("RUN's target did not resolve to a command.".into()),
             }
         }
@@ -186,6 +194,18 @@ fn resolve_path(operand: &Operand, references: &ReferenceContext) -> Option<Stri
             ResolvedObject::Text(t) => t.clone(),
         }),
         Operand::StringArg { value, .. } => Some(value.clone()),
+    }
+}
+
+/// `RUN`'s ownership domain (spec section 10): the operand's stated
+/// ownership if it has one, else `MY` — a bare `£ RUN 'chrome'` (a
+/// `StringArg`, no ownership prefix at all) or a resolved `THIS`/`THAT`
+/// reference (whose original ownership isn't tracked by
+/// `ReferenceContext`) both default to `MY`.
+fn ownership_domain(operand: &Operand) -> OwnershipKind {
+    match operand {
+        Operand::Owned { kind, .. } => *kind,
+        Operand::Reference { .. } | Operand::StringArg { .. } => OwnershipKind::My,
     }
 }
 
@@ -300,7 +320,10 @@ mod tests {
             dependency: None,
         });
         match plan(&cmd, &references) {
-            PlanOutcome::Plan(ExecutionPlan::Run { command_line }) => assert_eq!(command_line, "true"),
+            PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain }) => {
+                assert_eq!(command_line, "true");
+                assert_eq!(domain, OwnershipKind::My, "a bare StringArg operand has no ownership, so RUN defaults to MY");
+            }
             other => panic!("expected a run plan, got {other:?}"),
         }
     }
@@ -320,7 +343,33 @@ mod tests {
             dependency: None,
         });
         match plan(&cmd, &references) {
-            PlanOutcome::Plan(ExecutionPlan::Run { command_line }) => assert_eq!(command_line, "echo hi"),
+            PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain }) => {
+                assert_eq!(command_line, "echo hi");
+                assert_eq!(domain, OwnershipKind::My, "a reference operand carries no ownership, so RUN defaults to MY");
+            }
+            other => panic!("expected a run plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_with_explicit_our_ownership_carries_the_our_domain() {
+        let references = ReferenceContext::new();
+        let cmd = Command::Imperative(ImperativeCommand {
+            verb: Verb::Run,
+            verb_span: Span::default(),
+            operand: Some(Operand::Owned {
+                kind: OwnershipKind::Our,
+                path: "chrome".into(),
+                span: Span::default(),
+            }),
+            destination: None,
+            dependency: None,
+        });
+        match plan(&cmd, &references) {
+            PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain }) => {
+                assert_eq!(command_line, "chrome");
+                assert_eq!(domain, OwnershipKind::Our);
+            }
             other => panic!("expected a run plan, got {other:?}"),
         }
     }
