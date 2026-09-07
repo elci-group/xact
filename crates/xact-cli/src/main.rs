@@ -58,10 +58,15 @@
 //! blocks on that *specific* branch (not the others, which keep running
 //! independently) the moment a `WHEN` clause needs to know its outcome —
 //! a real wait-then-check gate, not a fabricated instant answer.
-//! Multi-branch fan-in dependencies, cancellation, and recovery
-//! constructs beyond a plain `WHEN ... FAILS` fallback are not
-//! implemented — see `MESUT_INTEGRATION.md`'s Phase 8 status for the
-//! honest boundary.
+//! Multi-branch fan-in dependencies and recovery constructs beyond a
+//! plain `WHEN ... FAILS` fallback are not implemented — see
+//! `MESUT_INTEGRATION.md`'s Phase 8 status for the honest boundary.
+//!
+//! Cancellation (spec section 12, Xact–Mesut Integration Phase 8,
+//! continued): `main` installs a real `CTRL-C` handler
+//! (`xact_cancel::cancel_all`) so an interrupt kills whatever's actually
+//! running instead of the default "kill the whole Xact process"
+//! disposition. See `xact-cancel`'s module docs for the mechanism.
 //!
 //! `@` blocks may be typed across several lines for readability (matching
 //! spec section 9's example layout): once a line starts with `@`, the REPL
@@ -217,11 +222,12 @@ fn print_outcome(branch: Option<&str>, outcome: &ExecutionOutcome) {
         ExecutionOutcome::Viewed { path, tool } => {
             println!("{prefix}{tool}: displayed {}", path.display());
         }
-        ExecutionOutcome::RunCompleted { command_line, success, code } => {
-            let status = match (success, code) {
-                (true, _) => "exited 0".to_string(),
-                (false, Some(code)) => format!("exited {code}"),
-                (false, None) => "terminated by signal".to_string(),
+        ExecutionOutcome::RunCompleted { command_line, success, code, signal } => {
+            let status = match (success, code, signal) {
+                (true, _, _) => "exited 0".to_string(),
+                (false, Some(code), _) => format!("exited {code}"),
+                (false, None, Some(signal)) => format!("terminated by signal {signal}"),
+                (false, None, None) => "terminated by signal".to_string(),
             };
             println!("{prefix}ran '{command_line}' — {status}");
         }
@@ -291,6 +297,18 @@ fn dispatch(
 }
 
 fn main() {
+    // Real CTRL-C cancellation (spec section 12; Xact–Mesut Integration
+    // Phase 8, continued): without this handler, CTRL-C's default
+    // disposition just kills the whole Xact process — the directive
+    // explicitly rules that out except for an irrecoverably unresponsive
+    // workload. `xact_cancel::cancel_all` sends a real SIGTERM to every
+    // process `xact-process`/`xact-bound`/`xact-tell` currently has
+    // registered; a killed child's `wait()` simply returns normally with
+    // a signal-terminated status, so the REPL loop below needs no special
+    // handling for this at all — it already treats that as an ordinary
+    // (if unsuccessful) outcome.
+    ctrlc::set_handler(xact_cancel::cancel_all).expect("failed to install CTRL-C handler");
+
     println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE, SEE, and RUN actually run");
     println!("Type a £ command, a ! policy statement, an @ agent block, or 'exit'.");
 

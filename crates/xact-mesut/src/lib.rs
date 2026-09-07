@@ -156,6 +156,12 @@ use mesut_observe::TaskEventType;
 pub struct ProcessOutcome {
     pub success: bool,
     pub code: Option<i32>,
+    /// The signal that terminated the process, if it did (Unix-only —
+    /// always `None` on a normal exit). This is what `£ RUN` under a real
+    /// `CTRL-C` cancellation (Xact–Mesut Integration Phase 8, continued)
+    /// looks like: `code` is `None` and `signal` is `Some(SIGTERM as
+    /// i32)`, not a fabricated "cancelled" outcome of its own.
+    pub signal: Option<i32>,
 }
 
 /// Mesut's execution-oriented telemetry for one task (spec section 19),
@@ -376,6 +382,7 @@ pub fn run_process_async(
             .map(|status| ProcessOutcome {
                 success: status.success(),
                 code: status.code(),
+                signal: std::os::unix::process::ExitStatusExt::signal(&status),
             })
             .map_err(|err| err.to_string())
     })
@@ -492,13 +499,13 @@ mod tests {
     #[test]
     fn run_process_reports_success() {
         let outcome = run_process("true".into(), xact_ast::ResourceBudget::default()).expect("true should launch");
-        assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0) });
+        assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0), signal: None });
     }
 
     #[test]
     fn run_process_reports_nonzero_exit_not_an_error() {
         let outcome = run_process("false".into(), xact_ast::ResourceBudget::default()).expect("false should launch");
-        assert_eq!(outcome, ProcessOutcome { success: false, code: Some(1) });
+        assert_eq!(outcome, ProcessOutcome { success: false, code: Some(1), signal: None });
     }
 
     #[test]
@@ -511,7 +518,7 @@ mod tests {
     fn run_process_applies_a_real_resource_budget() {
         let budget = xact_ast::ResourceBudget { cpu_percent: Some(50), ..Default::default() };
         let outcome = run_process("true".into(), budget).expect("true should launch under a real cgroup cap");
-        assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0) });
+        assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0), signal: None });
     }
 
     #[test]

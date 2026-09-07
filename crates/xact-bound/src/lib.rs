@@ -26,7 +26,9 @@
 //! `budget` (spec section 22, Xact–Mesut Integration Phase 5/6) is applied
 //! via `xact-resource` before spawning, same as `xact-process::run` — a
 //! `bound` aggregation over a large source set is exactly the kind of
-//! workload `SPEND`/`SAVE` exists to constrain.
+//! workload `SPEND`/`SAVE` exists to constrain. The spawned child is also
+//! registered with `xact-cancel` (Phase 8, continued) so a real `CTRL-C`
+//! can stop an in-progress aggregation the same way it stops `£ RUN`.
 
 use std::fmt;
 use std::path::Path;
@@ -55,10 +57,12 @@ pub fn aggregate(source: &Path, destination: Option<&Path>, budget: &ResourceBud
         command.arg("--out").arg(destination);
     }
 
-    let _guard = xact_resource::apply(&mut command, budget)
+    let _resource_guard = xact_resource::apply(&mut command, budget)
         .map_err(|err| BoundError(format!("cannot honour the active resource policy: {err}")))?;
 
-    let status = command.status().map_err(|e| BoundError(format!("failed to run bound: {e}")))?;
+    let mut child = command.spawn().map_err(|e| BoundError(format!("failed to run bound: {e}")))?;
+    let _cancel_guard = xact_cancel::register(child.id());
+    let status = child.wait().map_err(|e| BoundError(format!("failed to wait for bound: {e}")))?;
 
     if status.success() {
         Ok(())

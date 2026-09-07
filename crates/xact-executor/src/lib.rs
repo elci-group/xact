@@ -67,10 +67,14 @@ pub enum ExecutionOutcome {
     /// exited — a nonzero exit is a normal outcome (e.g. `grep` finding no
     /// matches), not an execution failure; [`ExecutionOutcome::Failed`] is
     /// reserved for Xact itself being unable to launch the plan at all.
+    /// `signal` is `Some` when a real signal (e.g. a `CTRL-C`-triggered
+    /// `SIGTERM`, Xact–Mesut Integration Phase 8's cancellation) is what
+    /// actually ended it, rather than a normal exit.
     RunCompleted {
         command_line: String,
         success: bool,
         code: Option<i32>,
+        signal: Option<i32>,
     },
     /// A source set was aggregated via `bound` — `destination` names
     /// where, or `None` for `bound`'s own clipboard default.
@@ -263,6 +267,7 @@ fn run_outcome(
             command_line,
             success: outcome.success,
             code: outcome.code,
+            signal: outcome.signal,
         },
         Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
     }
@@ -313,6 +318,7 @@ mod tests {
                 command_line: "true".into(),
                 success: true,
                 code: Some(0),
+                signal: None,
             }
         );
     }
@@ -329,6 +335,7 @@ mod tests {
                 command_line: "false".into(),
                 success: false,
                 code: Some(1),
+                signal: None,
             }
         );
     }
@@ -348,7 +355,7 @@ mod tests {
         let outcome = execute(ExecutionPlan::Run { command_line: "true".into() }, budget);
         assert_eq!(
             outcome,
-            ExecutionOutcome::RunCompleted { command_line: "true".into(), success: true, code: Some(0) }
+            ExecutionOutcome::RunCompleted { command_line: "true".into(), success: true, code: Some(0), signal: None }
         );
     }
 
@@ -423,6 +430,7 @@ mod tests {
                     command_line: "sleep 1".into(),
                     success: true,
                     code: Some(0),
+                    signal: None,
                 }
             );
         }

@@ -20,6 +20,13 @@
 //! so `RUN` cannot smuggle in shell semantics through a string Xact never
 //! validated as such. A real argument-list grammar is future work if this
 //! turns out to matter.
+//!
+//! Cancellation (spec section 12; Xact–Mesut Integration Phase 8,
+//! continued): the spawned child's pid is registered with `xact-cancel`
+//! between `spawn` and `wait`, so a real `CTRL-C` (via `xact-cli`'s
+//! handler) can actually kill it — a signal-terminated child just makes
+//! `wait` return normally with a `None` exit code, which the "terminated
+//! by signal" handling downstream already existed to describe.
 
 use std::fmt;
 use std::process::{Command, ExitStatus};
@@ -54,10 +61,12 @@ pub fn run(command_line: &str, budget: &ResourceBudget) -> Result<ExitStatus, Pr
     let mut command = Command::new(program);
     command.args(&args);
 
-    let _guard = xact_resource::apply(&mut command, budget)
+    let _resource_guard = xact_resource::apply(&mut command, budget)
         .map_err(|err| ProcessError(format!("cannot honour the active resource policy: {err}")))?;
 
-    command.status().map_err(|e| ProcessError(format!("failed to run '{program}': {e}")))
+    let mut child = command.spawn().map_err(|e| ProcessError(format!("failed to run '{program}': {e}")))?;
+    let _cancel_guard = xact_cancel::register(child.id());
+    child.wait().map_err(|e| ProcessError(format!("failed to wait for '{program}': {e}")))
 }
 
 #[cfg(test)]
@@ -116,5 +125,35 @@ mod tests {
     fn an_unenforceable_resource_fails_before_launching() {
         let budget = ResourceBudget { unenforceable: vec!["GPU".to_string()], ..Default::default() };
         assert!(run("true", &budget).is_err());
+    }
+
+    /// Proves cancellation reaches all the way through `run` to the real
+    /// child process, not just `xact-cancel`'s own unit tests. Calls
+    /// `xact_cancel::cancel_all` directly — the same call `xact-cli`'s
+    /// real `CTRL-C` handler makes — from a second thread while `run` is
+    /// blocked waiting on a real `sleep`. This crate's other tests all
+    /// finish in milliseconds, well before the ~200ms this test waits
+    /// before cancelling, so the tiny window where a stray `cancel_all`
+    /// could reach an unrelated sibling test's already-finishing child is
+    /// not a practical race.
+    #[test]
+    fn cancellation_actually_kills_a_running_run_call() {
+        xact_cancel::reset();
+        let start = std::time::Instant::now();
+
+        let handle = std::thread::spawn(|| run("sleep 10", &ResourceBudget::default()));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        xact_cancel::cancel_all();
+
+        let status = handle.join().expect("run should not panic").expect("sleep should launch");
+        let elapsed = start.elapsed();
+
+        assert!(!status.success(), "a cancelled process should not report success");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancellation should stop the process almost immediately, not let the full 10s sleep elapse (took {elapsed:?})"
+        );
+
+        xact_cancel::reset();
     }
 }

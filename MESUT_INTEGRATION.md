@@ -181,10 +181,32 @@
 > a `WHEN ... FAILS` fallback after a skip still fires correctly against the real prior failure.
 > Full test suite green, zero regressions.
 >
-> **Not implemented, honestly**: real `CTRL-C` cancellation propagation (section 12) — no signal
-> handler exists anywhere in `xact-cli`, and none of the `Work` job closures check the
-> `CancellationToken` they're given; killing a real running child process on interrupt is real,
-> achievable follow-up work, not attempted here. Multi-branch aggregation (section 22's concurrent
+> **Update — real `CTRL-C` cancellation added.** Section 12: "Cancellation SHALL be first-class...
+> Xact SHALL propagate cancellation through the Mesut execution context... Cancellation SHALL NOT
+> require killing the entire Xact process unless the workload has become irrecoverably
+> unresponsive." New `xact-cancel` crate: a process-global registry every real process-spawning
+> adapter (`xact-process`, `xact-bound`, `xact-tell`) registers its child's pid into between
+> `spawn` and `wait`; `xact-cli`'s `main` installs a real `CTRL-C` handler
+> (`ctrlc::set_handler(xact_cancel::cancel_all)`) that sends a real `SIGTERM` to every currently
+> registered pid. Deliberately does not rely on the terminal's own default `SIGINT`-to-process-group
+> behavior (real, but unobservable/untestable outside an interactive terminal, and a no-op when
+> Xact is invoked non-interactively) — signalling every registered child explicitly is deterministic
+> regardless of how Xact was invoked. A killed child's `wait()` just returns normally with a
+> signal-terminated status; no new outcome type was needed anywhere upstream — `RunCompleted`
+> already had a "terminated by signal" case (from Phase 2), now also carrying which signal.
+> Mesut's own `CancellationToken`/`MesuT::cancel` is not used for this: it can only stop
+> not-yet-started work, not interrupt an already-blocking foreign-process `wait()` — confirmed by
+> reading `Work::execute`'s cancellation check, which only runs before a job starts. Verified live,
+> not just unit-tested: a real `SIGINT` sent to a running `xact` process (via `kill -INT`, a
+> genuine OS signal, not simulated) while `£ RUN 'sleep 30'` was executing killed it in about a
+> second, and — critically — the `xact` process itself kept running afterward and correctly
+> accepted and ran a subsequent command, satisfying "SHALL NOT require killing the entire Xact
+> process" for real. Full test suite green.
+>
+> **Still not implemented, honestly**: Mesut-level cancellation of a `! CONCURRENTLY` branch that
+> is queued but hasn't started yet (only an already-running child process is killed by the above;
+> a branch still waiting in Mesut's admission queue has no OS process to signal, and nothing here
+> calls `MesuT::cancel` on its `TaskId`). Multi-branch aggregation (section 22's concurrent
 > `A/B/C -> aggregate` case — a dependency fanning in from more than one branch) is not implemented;
 > today's single-slot `THIS`/`THAT` model has no representation for "wait on more than one prior
 > thing." `retry`/`cleanup`/`rollback`/`ignore` (section 23) beyond the minimal `WHEN ... FAILS`

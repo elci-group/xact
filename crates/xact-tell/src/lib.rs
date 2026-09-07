@@ -31,10 +31,12 @@
 //! the stated number is folded into the prompt text itself as a plain
 //! instruction, letting the model interpret it in its own words.
 //!
-//! Not implemented here (Xact–Mesut Integration Phase 8, not 7):
-//! cancellation mid-generation, and `WHEN`-style dependencies between a
-//! `TELL` and other work. `ollama`'s own real thinking-mode/streaming
-//! behavior is otherwise used as-is, uninterpreted.
+//! Cancellation mid-generation is real (Xact–Mesut Integration Phase 8,
+//! continued): the spawned `ollama` process is registered with
+//! `xact-cancel` between `spawn` and `wait_with_output`, so a real
+//! `CTRL-C` can stop generation the same way it stops `£ RUN`/`£ BOUND`.
+//! `ollama`'s own real thinking-mode/streaming behavior is otherwise used
+//! as-is, uninterpreted.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -88,10 +90,15 @@ pub fn tell(request: &TellRequest, populating: Option<&Path>, budget: &ResourceB
         command.arg("--think").arg("true");
     }
 
-    let _guard = xact_resource::apply(&mut command, budget)
+    let _resource_guard = xact_resource::apply(&mut command, budget)
         .map_err(|err| TellError(format!("cannot honour the active resource policy: {err}")))?;
 
-    let output = command.output().map_err(|err| TellError(format!("failed to run ollama: {err}")))?;
+    command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let child = command.spawn().map_err(|err| TellError(format!("failed to run ollama: {err}")))?;
+    let _cancel_guard = xact_cancel::register(child.id());
+    let output = child
+        .wait_with_output()
+        .map_err(|err| TellError(format!("failed to wait for ollama: {err}")))?;
     if !output.status.success() {
         return Err(TellError(format!(
             "ollama exited with {}: {}",
@@ -169,7 +176,6 @@ mod tests {
     /// Kept to a single small model and a short deterministic instruction
     /// to bound that cost; still a genuine network-free local inference
     /// call, not a stub.
-    #[test]
     fn tell_runs_the_real_ollama_model_and_populates_a_real_file() {
         let dir = std::env::temp_dir().join(format!("xact-tell-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -206,5 +212,54 @@ mod tests {
         };
         let budget = ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
         assert!(tell(&request, None, &budget).is_err());
+    }
+
+    /// Proves cancellation reaches all the way through `tell` to the real
+    /// `ollama` process, not just `xact-cancel`'s own unit tests. A real
+    /// model call normally takes tens of seconds (model load plus
+    /// generation, per `tell_runs_the_real_ollama_model_and_populates_a_
+    /// real_file`); if `cancel_all` genuinely kills it, `tell` returns in
+    /// a few seconds instead — the win a real `CTRL-C` gives a user is
+    /// exactly this.
+    fn cancellation_actually_kills_a_running_tell_call() {
+        xact_cancel::reset();
+        let start = std::time::Instant::now();
+
+        let handle = std::thread::spawn(|| {
+            let request = TellRequest {
+                model: "gemma3".into(),
+                persona: None,
+                reading: None,
+                instruction: "Write a very long, detailed essay about the history of computing.".into(),
+                think: None,
+            };
+            tell(&request, None, &ResourceBudget::default())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        xact_cancel::cancel_all();
+
+        let result = handle.join().expect("tell should not panic");
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "a cancelled ollama call should be reported as a failure, not a fabricated success");
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "cancellation should stop ollama well before it would normally finish (took {elapsed:?})"
+        );
+
+        xact_cancel::reset();
+    }
+
+    /// Both real, slow, `ollama`-invoking cases run sequentially in one
+    /// test: `xact-cancel`'s registry is process-global, and cargo runs
+    /// tests within a crate in parallel by default — running them as
+    /// separate `#[test]`s let a `cancel_all` from one kill the other's
+    /// still-running `ollama` process (observed directly: the normal-
+    /// completion case failed with "ollama exited with signal: 15" when
+    /// run alongside the cancellation case).
+    #[test]
+    fn real_ollama_end_to_end_and_cancellation() {
+        tell_runs_the_real_ollama_model_and_populates_a_real_file();
+        cancellation_actually_kills_a_running_tell_call();
     }
 }
