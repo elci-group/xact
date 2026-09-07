@@ -258,6 +258,32 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// `MY`'s real default anchor for a bare relative path (spec section 10):
+/// `£ SEE MY project/README.md` means `~/project/README.md`, the same as
+/// if `~/` had actually been typed — not a path relative to whatever
+/// directory Xact happens to be running from. Only `RUN` is excluded
+/// (`home_relative_default: false`): its `MY` path names a program for
+/// `$PATH` search (see [`search_dirs_for`]/`xact-process`), not a
+/// filesystem location, so treating `£ RUN MY chrome` as `~/chrome` would
+/// break real binary resolution rather than default it sensibly. `OUR`
+/// and `THEIR` are never touched here — this default is `MY`-specific.
+///
+/// Only applies to a genuinely bare reference: a path already starting
+/// with `/` (explicitly absolute) or `~` (already home-relative, which is
+/// this same default spelled out by hand) is returned unchanged. The
+/// result is still an ordinary path string, not yet expanded — callers
+/// that need a real `PathBuf` still call [`expand_tilde`] on it after
+/// (`xact-completion-graph` instead feeds it straight into
+/// [`list_path_entries`], since that keeps `~/`-style candidate text
+/// human-readable rather than the fully expanded absolute form).
+pub fn anchor_my_default(path: &str, domain: OwnershipKind, home_relative_default: bool) -> String {
+    if home_relative_default && domain == OwnershipKind::My && !path.starts_with('/') && !path.starts_with('~') {
+        format!("~/{path}")
+    } else {
+        path.to_string()
+    }
+}
+
 /// Real installed binaries whose name starts with `prefix`, searched under
 /// exactly the directories `domain` would use to resolve *one* program
 /// (see [`search_dirs_for`]) — plus `$PATH` itself for `MY`/`THEIR`, since
@@ -522,6 +548,35 @@ mod tests {
         let home = std::env::var("HOME").unwrap();
         assert_eq!(expand_tilde("~/x"), PathBuf::from(home).join("x"));
         assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
+    }
+
+    #[test]
+    fn anchor_my_default_anchors_a_bare_relative_my_path_at_home() {
+        assert_eq!(anchor_my_default("project/x", OwnershipKind::My, true), "~/project/x");
+    }
+
+    #[test]
+    fn anchor_my_default_leaves_an_absolute_path_unchanged() {
+        assert_eq!(anchor_my_default("/tmp/project", OwnershipKind::My, true), "/tmp/project");
+    }
+
+    #[test]
+    fn anchor_my_default_leaves_an_already_tilde_path_unchanged() {
+        assert_eq!(anchor_my_default("~/project", OwnershipKind::My, true), "~/project");
+    }
+
+    #[test]
+    fn anchor_my_default_never_applies_to_our_or_their() {
+        assert_eq!(anchor_my_default("project", OwnershipKind::Our, true), "project");
+        assert_eq!(anchor_my_default("project", OwnershipKind::Their, true), "project");
+    }
+
+    #[test]
+    fn anchor_my_default_never_applies_when_disabled() {
+        // The RUN case: MY's path names a $PATH-searched program, not a
+        // filesystem location, so `home_relative_default: false` must
+        // leave it exactly as typed.
+        assert_eq!(anchor_my_default("chrome", OwnershipKind::My, false), "chrome");
     }
 
     #[test]

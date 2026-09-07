@@ -88,7 +88,7 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             match resolve_path(operand, references) {
                 Some(path) => PlanOutcome::Plan(ExecutionPlan::Bank {
-                    path: xact_resolve::expand_tilde(&path),
+                    path: resolve_my_default_path(&path, operand),
                 }),
                 None => PlanOutcome::Unsupported("CREATE's target did not resolve to a path.".into()),
             }
@@ -99,7 +99,7 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             match resolve_path(operand, references) {
                 Some(raw) => {
-                    let path = xact_resolve::expand_tilde(&raw);
+                    let path = resolve_my_default_path(&raw, operand);
                     if path.is_dir() {
                         PlanOutcome::Plan(ExecutionPlan::ViewDirectory { path })
                     } else if path.is_file() {
@@ -134,12 +134,12 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             let destination = match &cmd.destination {
                 Some(dest_operand) => match resolve_path(dest_operand, references) {
-                    Some(raw) => Some(xact_resolve::expand_tilde(&raw)),
+                    Some(raw) => Some(resolve_my_default_path(&raw, dest_operand)),
                     None => return PlanOutcome::Unsupported("BOUND's destination did not resolve to a path.".into()),
                 },
                 None => None,
             };
-            PlanOutcome::Plan(ExecutionPlan::Bound { source: xact_resolve::expand_tilde(&raw_source), destination })
+            PlanOutcome::Plan(ExecutionPlan::Bound { source: resolve_my_default_path(&raw_source, operand), destination })
         }
         other => PlanOutcome::Unsupported(format!("{} has no execution plan yet.", other.as_str())),
     }
@@ -165,14 +165,14 @@ pub fn plan_agent(block: &AgentBlock, references: &ReferenceContext) -> PlanOutc
 
     let reading = match block.clause(AgentClauseKind::Reading) {
         Some(AgentClause::Reading { operand, .. }) => match resolve_path(operand, references) {
-            Some(raw) => Some(xact_resolve::expand_tilde(&raw)),
+            Some(raw) => Some(resolve_my_default_path(&raw, operand)),
             None => return PlanOutcome::Unsupported("TELL's READING target did not resolve to a path.".into()),
         },
         _ => None,
     };
     let populating = match block.clause(AgentClauseKind::Populating) {
         Some(AgentClause::Populating { operand, .. }) => match resolve_path(operand, references) {
-            Some(raw) => Some(xact_resolve::expand_tilde(&raw)),
+            Some(raw) => Some(resolve_my_default_path(&raw, operand)),
             None => return PlanOutcome::Unsupported("TELL's POPULATING target did not resolve to a path.".into()),
         },
         _ => None,
@@ -199,7 +199,7 @@ fn resolve_path(operand: &Operand, references: &ReferenceContext) -> Option<Stri
     }
 }
 
-/// `RUN`'s ownership domain (spec section 10): the operand's stated
+/// An operand's ownership domain (spec section 10): the operand's stated
 /// ownership if it has one, else `MY` — a bare `£ RUN 'chrome'` (a
 /// `StringArg`, no ownership prefix at all) or a resolved `THIS`/`THAT`
 /// reference (whose original ownership isn't tracked by
@@ -209,6 +209,21 @@ fn ownership_domain(operand: &Operand) -> OwnershipKind {
         Operand::Owned { kind, .. } => *kind,
         Operand::Reference { .. } | Operand::StringArg { .. } => OwnershipKind::My,
     }
+}
+
+/// Every verb this function is called from is a real filesystem target
+/// (`CREATE`/`SEE`/`BOUND`/`TELL`'s `READING`/`POPULATING`) — `RUN` never
+/// calls this at all (its `command_line` is used exactly as resolved,
+/// with no tilde expansion, since it names a `$PATH`-searched program,
+/// not a location — see `xact-process`), which is exactly the "everything
+/// except RUN" boundary `xact_resolve::anchor_my_default` expects. `raw`
+/// is `resolve_path(operand, ..)`'s already-resolved string (an `Owned`
+/// operand's literal path, a `StringArg`'s literal text, or a `THIS`/
+/// `THAT` reference's previously-established — and so already anchored —
+/// path).
+fn resolve_my_default_path(raw: &str, operand: &Operand) -> PathBuf {
+    let anchored = xact_resolve::anchor_my_default(raw, ownership_domain(operand), true);
+    xact_resolve::expand_tilde(&anchored)
 }
 
 #[cfg(test)]
@@ -226,21 +241,82 @@ mod tests {
         })
     }
 
+    /// `$HOME` is process-global mutable state, and cargo runs tests in
+    /// parallel by default — every test here that sets it to a controlled
+    /// value (for a deterministic assertion) takes this lock first and
+    /// restores the real value before returning, so it can never be
+    /// observed by, or race against, a concurrently-running test.
+    static HOME_SENSITIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_test_home<T>(home: &str, body: impl FnOnce() -> T) -> T {
+        let _guard = HOME_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        let result = body();
+        match original {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
     #[test]
     fn create_with_owned_path_expands_tilde() {
-        std::env::set_var("HOME", "/home/testuser");
-        let references = ReferenceContext::new();
-        let cmd = create_command(Operand::Owned {
-            kind: OwnershipKind::My,
-            path: "~/project/src/main.rs".into(),
-            span: Span::default(),
-        });
-        match plan(&cmd, &references) {
-            PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
-                assert_eq!(path, PathBuf::from("/home/testuser/project/src/main.rs"));
+        with_test_home("/home/testuser", || {
+            let references = ReferenceContext::new();
+            let cmd = create_command(Operand::Owned {
+                kind: OwnershipKind::My,
+                path: "~/project/src/main.rs".into(),
+                span: Span::default(),
+            });
+            match plan(&cmd, &references) {
+                PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
+                    assert_eq!(path, PathBuf::from("/home/testuser/project/src/main.rs"));
+                }
+                other => panic!("expected a bank plan, got {other:?}"),
             }
-            other => panic!("expected a bank plan, got {other:?}"),
-        }
+        });
+    }
+
+    /// The behavior requested directly: `MY` with a bare relative path
+    /// (no `~/`, no leading `/`) defaults to being anchored at `~/` —
+    /// `£ CREATE MY project/src/main.rs` means `~/project/src/main.rs`,
+    /// not a path relative to Xact's own working directory.
+    #[test]
+    fn my_with_a_bare_relative_path_defaults_to_home() {
+        with_test_home("/home/testuser", || {
+            let references = ReferenceContext::new();
+            let cmd = create_command(Operand::Owned {
+                kind: OwnershipKind::My,
+                path: "project/src/main.rs".into(),
+                span: Span::default(),
+            });
+            match plan(&cmd, &references) {
+                PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
+                    assert_eq!(path, PathBuf::from("/home/testuser/project/src/main.rs"));
+                }
+                other => panic!("expected a bank plan, got {other:?}"),
+            }
+        });
+    }
+
+    /// `OUR` and `THEIR` never get the `MY`-only home default — a bare
+    /// relative path under either stays relative to Xact's own working
+    /// directory, unchanged from before this default existed.
+    #[test]
+    fn our_and_their_are_not_anchored_at_home() {
+        with_test_home("/home/testuser", || {
+            let references = ReferenceContext::new();
+            for kind in [OwnershipKind::Our, OwnershipKind::Their] {
+                let cmd = create_command(Operand::Owned { kind, path: "project/README.md".into(), span: Span::default() });
+                match plan(&cmd, &references) {
+                    PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
+                        assert_eq!(path, PathBuf::from("project/README.md"), "{kind:?}");
+                    }
+                    other => panic!("expected a bank plan for {kind:?}, got {other:?}"),
+                }
+            }
+        });
     }
 
     #[test]
@@ -365,6 +441,10 @@ mod tests {
 
     #[test]
     fn bound_with_no_destination_resolves_source_only() {
+        // Reads real $HOME and depends on it staying stable for the whole
+        // body — needs the same HOME_SENSITIVE serialization as tests
+        // that actually override it (see with_test_home's doc comment).
+        let _guard = HOME_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         let references = ReferenceContext::new();
         let cmd = Command::Imperative(ImperativeCommand {
             verb: Verb::Bound,
@@ -521,6 +601,9 @@ mod tests {
 
     #[test]
     fn tell_resolves_every_clause() {
+        // See bound_with_no_destination_resolves_source_only's comment:
+        // reads real $HOME and needs it stable for the whole body.
+        let _guard = HOME_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         let references = ReferenceContext::new();
         let home = std::env::var("HOME").unwrap();
         let block = agent_block(vec![

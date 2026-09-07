@@ -50,7 +50,13 @@ pub fn dynamic_complete(input: &str) -> Vec<String> {
             if resolvers.contains(&ResolverKind::InstalledBinary) {
                 xact_resolve::list_binaries(path, *kind)
             } else if resolvers.contains(&ResolverKind::FilesystemPath) {
-                xact_resolve::list_path_entries(path)
+                // Every verb with a filesystem_path resolver is, by
+                // construction, not RUN (see xact-resolve's ontology), so
+                // MY's real default -- a bare relative path anchored at
+                // ~/, same as xact-planner applies at execution time --
+                // always applies here.
+                let anchored = xact_resolve::anchor_my_default(path, *kind, true);
+                xact_resolve::list_path_entries(&anchored)
             } else {
                 Vec::new()
             }
@@ -125,6 +131,40 @@ mod tests {
         assert!(!suggestions.iter().any(|s| s.ends_with("other.txt")));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `$HOME` is process-global mutable state, and cargo runs tests in
+    /// parallel by default — any test that overrides it takes this lock
+    /// first and restores the real value before returning (same pattern
+    /// as `xact-planner`'s `HOME_SENSITIVE`).
+    static HOME_SENSITIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The behavior requested directly, on the completion side: `MY` with
+    /// a bare relative path (no `~/`, no leading `/`) defaults to `~/`,
+    /// the same real default `xact-planner` applies at execution time —
+    /// `£ SEE MY project` should dynamic-complete against `~/project*`,
+    /// not whatever directory the REPL happens to be running from.
+    #[test]
+    fn my_with_a_bare_relative_path_defaults_to_home_completion() {
+        let _guard = HOME_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("xact-completion-graph-home-test-{}", std::process::id()));
+        fs::create_dir_all(home.join("myproject")).unwrap();
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+
+        let suggestions = dynamic_complete("£ SEE MY myproj");
+
+        match original_home {
+            Some(original) => std::env::set_var("HOME", original),
+            None => std::env::remove_var("HOME"),
+        }
+        fs::remove_dir_all(&home).ok();
+
+        // The candidate text is built from the anchored ~/ prefix, not
+        // the fully-expanded absolute directory -- the same
+        // human-readable, portable form a literally-typed `~/` would
+        // produce, and honest about what MY actually resolved against.
+        assert_eq!(suggestions, vec!["~/myproject/".to_string()], "{suggestions:?}");
     }
 
     #[test]

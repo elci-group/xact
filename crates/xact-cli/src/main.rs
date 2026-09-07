@@ -248,6 +248,26 @@ fn add_completion_keybindings(kb: &mut Keybindings) {
         ReedlineEvent::UntilFound(vec![ReedlineEvent::Menu(COMPLETION_MENU.to_string()), ReedlineEvent::MenuNext]),
     );
     kb.add_binding(KeyModifiers::SHIFT, KeyCode::BackTab, ReedlineEvent::MenuPrevious);
+
+    // Overrides default_emacs_keybindings' plain `Enter -> Enter`: because
+    // the menu above re-opens/refreshes on essentially every keystroke
+    // (that's what makes it live), it's still "active" by the time a
+    // fully-typed command is ready to run -- and reedline's own Enter
+    // handling, whenever *any* menu is active, unconditionally inserts
+    // the highlighted candidate and closes the menu INSTEAD of
+    // submitting (confirmed directly in reedline's source: the
+    // `Enter | Submit | SubmitOrNewline if menus.any(is_active)` arm in
+    // `Reedline::handle_editor_event`). Left alone, that means a real,
+    // fully-typed command needs Enter pressed *twice* to actually run --
+    // an unacceptable regression for the REPL's core job. `Esc` (which
+    // only calls `deactivate_menus()`, no buffer mutation) run first
+    // closes it cleanly, so this Enter always reaches plain submission in
+    // one press, exactly like before live completion existed.
+    kb.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Enter,
+        ReedlineEvent::Multiple(vec![ReedlineEvent::Esc, ReedlineEvent::Enter]),
+    );
 }
 
 /// Builds the live line editor: `XactCompleter` (backed by `session`) as
