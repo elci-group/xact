@@ -89,6 +89,29 @@
 > `£ CREATE`/`£ SEE` are not constrained by a resource budget yet — a scope decision (every
 > spec/directive example pairs `SPEND`/`SAVE` with `RUN`), not an oversight. See
 > `crates/xact-resource/src/lib.rs` module docs for the full detail.
+>
+> **Phase 6 — done.** Directive: "Route appropriate BANK/BOUND operations through the unified
+> execution path." `£ CREATE` (`bank`) has gone through the adapter since Phase 2; `BOUND` (spec
+> sections 4, 12) was not previously a language verb at all — `Verb::Bound` is new, reusing the
+> already-generic `to <ownership> <path>` destination grammar (spec section 7) rather than
+> inventing new syntax: `£ BOUND MY ~/project/ to MY ~/bundle.txt`, or with no destination for
+> `bound`'s own clipboard default. New `xact-bound` crate composes the real `bound` binary — its
+> CLI's two ordered positionals (`[FILTER] [DIRECTORY]`) mean a single positional value always
+> fills `FILTER`, never `DIRECTORY`, and there is no "match everything" filter string, so
+> `aggregate` instead sets the child process's working directory to the source and passes zero
+> positionals, letting `bound`'s own no-filter/current-directory defaults apply exactly as if a
+> user had `cd`'d there. `£ BOUND` gets full parity with every other verb — `xact-mesut::
+> bound_aggregate`/`bound_aggregate_async` submit through the same `WorkKind::Blocking` seam, with
+> the same lifecycle events and the same `ResourceBudget` enforcement (via `xact-resource`) as
+> `£ RUN` — proving "unified execution path" for real rather than adding a parallel special case.
+> Verified live: a real file gets aggregated through the full CLI pipeline, and `£ BOUND` under
+> `! SPEND 40%CPU` and `! CONCURRENTLY` together shows the same real `submitted → routed → queued →
+> started → completed` lifecycle and the same independent-branch queuing as `£ RUN` does. Full test
+> suite green, zero regressions. See `crates/xact-bound/src/lib.rs` module docs for the full
+> detail. `BOUND`'s full `BoundSourceSet` grammar (spec section 12: multiple roots, filters,
+> dependency resolution, token/size/depth limits) is not implemented — only a single source and an
+> optional destination, matching what the existing operand/destination grammar already expresses;
+> widening the grammar itself is separate, larger work, not attempted here.
 
 ---
 

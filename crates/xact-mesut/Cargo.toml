@@ -11,4 +11,5 @@ xact-ast = { workspace = true }
 xact-process = { workspace = true }
 xact-bank = { workspace = true }
 xact-see = { workspace = true }
+xact-bound = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }

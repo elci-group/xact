@@ -30,10 +30,16 @@ pub enum Verb {
     /// tool-owns-implementation boundary — the same distinction section 12
     /// draws between `BOUND` and the `bound` tool).
     Create,
+    /// `£ BOUND MY ~/project/ to MY ~/bundle.txt` — aggregate a deliberately
+    /// established source set (spec section 12), distinct from `bound`, the
+    /// tool that happens to execute it. The `to` destination (already
+    /// generic grammar, spec section 7) is `bound`'s own `--out` file; with
+    /// none given, `bound`'s own clipboard default applies.
+    Bound,
 }
 
 impl Verb {
-    pub const ALL: [Verb; 9] = [
+    pub const ALL: [Verb; 10] = [
         Verb::See,
         Verb::Edit,
         Verb::Move,
@@ -43,6 +49,7 @@ impl Verb {
         Verb::Delete,
         Verb::Run,
         Verb::Create,
+        Verb::Bound,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -56,6 +63,7 @@ impl Verb {
             Verb::Delete => "DELETE",
             Verb::Run => "RUN",
             Verb::Create => "CREATE",
+            Verb::Bound => "BOUND",
         }
     }
 
@@ -70,13 +78,14 @@ impl Verb {
             "DELETE" => Verb::Delete,
             "RUN" => Verb::Run,
             "CREATE" => Verb::Create,
+            "BOUND" => Verb::Bound,
             _ => return None,
         })
     }
 
     /// Whether this verb accepts a `to <ownership> <path>` destination clause.
     pub fn accepts_destination(&self) -> bool {
-        matches!(self, Verb::Move | Verb::Copy | Verb::Paste | Verb::Cut)
+        matches!(self, Verb::Move | Verb::Copy | Verb::Paste | Verb::Cut | Verb::Bound)
     }
 }
 

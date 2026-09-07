@@ -37,6 +37,10 @@ pub enum ExecutionPlan {
     /// `RUN` -> native process execution (spec section 21: no ELci tool
     /// owns this).
     Run { command_line: String },
+    /// `BOUND` -> the `bound` tool (spec sections 4, 12, 21). `destination`
+    /// is `bound`'s own `--out` file; `None` means `bound`'s clipboard
+    /// default applies.
+    Bound { source: PathBuf, destination: Option<PathBuf> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +96,22 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
                 Some(command_line) => PlanOutcome::Plan(ExecutionPlan::Run { command_line }),
                 None => PlanOutcome::Unsupported("RUN's target did not resolve to a command.".into()),
             }
+        }
+        xact_ast::Verb::Bound => {
+            let Some(operand) = &cmd.operand else {
+                return PlanOutcome::Unsupported("BOUND requires a source to aggregate.".into());
+            };
+            let Some(raw_source) = resolve_path(operand, references) else {
+                return PlanOutcome::Unsupported("BOUND's source did not resolve to a path.".into());
+            };
+            let destination = match &cmd.destination {
+                Some(dest_operand) => match resolve_path(dest_operand, references) {
+                    Some(raw) => Some(expand_tilde(&raw)),
+                    None => return PlanOutcome::Unsupported("BOUND's destination did not resolve to a path.".into()),
+                },
+                None => None,
+            };
+            PlanOutcome::Plan(ExecutionPlan::Bound { source: expand_tilde(&raw_source), destination })
         }
         other => PlanOutcome::Unsupported(format!("{} has no execution plan yet.", other.as_str())),
     }
@@ -237,6 +257,70 @@ mod tests {
         match plan(&cmd, &references) {
             PlanOutcome::Plan(ExecutionPlan::Run { command_line }) => assert_eq!(command_line, "echo hi"),
             other => panic!("expected a run plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bound_with_no_destination_resolves_source_only() {
+        let references = ReferenceContext::new();
+        let cmd = Command::Imperative(ImperativeCommand {
+            verb: Verb::Bound,
+            verb_span: Span::default(),
+            operand: Some(Operand::Owned {
+                kind: OwnershipKind::My,
+                path: "~/project".into(),
+                span: Span::default(),
+            }),
+            destination: None,
+        });
+        let home = std::env::var("HOME").unwrap();
+        match plan(&cmd, &references) {
+            PlanOutcome::Plan(ExecutionPlan::Bound { source, destination }) => {
+                assert_eq!(source, PathBuf::from(format!("{home}/project")));
+                assert_eq!(destination, None);
+            }
+            other => panic!("expected a bound plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bound_with_destination_resolves_both_paths() {
+        let references = ReferenceContext::new();
+        let cmd = Command::Imperative(ImperativeCommand {
+            verb: Verb::Bound,
+            verb_span: Span::default(),
+            operand: Some(Operand::Owned {
+                kind: OwnershipKind::My,
+                path: "/tmp/project".into(),
+                span: Span::default(),
+            }),
+            destination: Some(Operand::Owned {
+                kind: OwnershipKind::My,
+                path: "/tmp/bundle.txt".into(),
+                span: Span::default(),
+            }),
+        });
+        match plan(&cmd, &references) {
+            PlanOutcome::Plan(ExecutionPlan::Bound { source, destination }) => {
+                assert_eq!(source, PathBuf::from("/tmp/project"));
+                assert_eq!(destination, Some(PathBuf::from("/tmp/bundle.txt")));
+            }
+            other => panic!("expected a bound plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bound_without_a_source_is_unsupported() {
+        let references = ReferenceContext::new();
+        let cmd = Command::Imperative(ImperativeCommand {
+            verb: Verb::Bound,
+            verb_span: Span::default(),
+            operand: None,
+            destination: None,
+        });
+        match plan(&cmd, &references) {
+            PlanOutcome::Unsupported(reason) => assert!(reason.contains("BOUND")),
+            other => panic!("expected unsupported, got {other:?}"),
         }
     }
 

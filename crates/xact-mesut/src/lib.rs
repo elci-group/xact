@@ -109,6 +109,17 @@
 //! how the OS process is spawned, owned end-to-end by
 //! `xact-process`/`xact-resource`, orthogonal to which Mesut executor
 //! thread happens to call `Command::spawn`.
+//!
+//! # Phase 6 (this crate, now)
+//!
+//! Directive section 32's Phase 6: "Route appropriate BANK/BOUND
+//! operations through the unified execution path." `£ CREATE` (`bank`)
+//! has gone through this adapter since Phase 2; [`bound_aggregate`]/
+//! [`bound_aggregate_async`] give `£ BOUND` the same full treatment —
+//! `WorkKind::Blocking` submission, lifecycle events, and a
+//! `ResourceBudget` — rather than a special-cased path, which is the
+//! actual meaning of "unified": every real external-tool call goes
+//! through the same seam, whichever tool it happens to be.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -395,6 +406,29 @@ pub fn view_file_async(path: PathBuf) -> Result<PendingTask<()>, AdapterError> {
     })
 }
 
+/// Aggregates `source` behind the Mesut adapter (`£ BOUND`'s execution
+/// path), constrained by `budget`. `xact-bound` still owns the actual
+/// `bound` invocation and, via `xact-resource`, the actual enforcement.
+pub fn bound_aggregate(
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    budget: xact_ast::ResourceBudget,
+) -> Result<(), AdapterError> {
+    bound_aggregate_async(source, destination, budget)?.join()
+}
+
+/// Same as [`bound_aggregate`], but returns immediately as an independent
+/// branch.
+pub fn bound_aggregate_async(
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    budget: xact_ast::ResourceBudget,
+) -> Result<PendingTask<()>, AdapterError> {
+    submit("xact.bound", move || {
+        xact_bound::aggregate(&source, destination.as_deref(), &budget).map_err(|err| err.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +497,35 @@ mod tests {
     fn view_directory_runs_gls_through_the_adapter() {
         let result = view_directory(std::env::temp_dir());
         assert!(result.is_ok(), "gls is expected to be installed and to succeed: {result:?}");
+    }
+
+    #[test]
+    fn bound_aggregate_runs_the_real_bound_tool() {
+        let dir = std::env::temp_dir().join(format!("xact-mesut-bound-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        let out = dir.join("bundle.txt");
+
+        let result = bound_aggregate(dir.clone(), Some(out.clone()), xact_ast::ResourceBudget::default());
+
+        assert!(result.is_ok(), "bound should succeed: {result:?}");
+        assert!(out.is_file(), "bound should have written the output file");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bound_aggregate_fails_before_launching_for_an_unenforceable_resource() {
+        let dir = std::env::temp_dir().join(format!("xact-mesut-bound-budget-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let budget = xact_ast::ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
+        let result = bound_aggregate(dir.clone(), None, budget);
+
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Proves `_async` submissions are genuinely concurrent branches, not

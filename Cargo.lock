@@ -696,6 +696,10 @@ version = "0.1.0"
 [[package]]
 name = "xact-bound"
 version = "0.1.0"
+dependencies = [
+ "xact-ast",
+ "xact-resource",
+]
 
 [[package]]
 name = "xact-cli"
@@ -761,6 +765,7 @@ dependencies = [
  "tokio",
  "xact-ast",
  "xact-bank",
+ "xact-bound",
  "xact-process",
  "xact-see",
 ]

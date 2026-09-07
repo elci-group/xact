@@ -5,10 +5,11 @@
 //! Once a command is accepted, the CLI plans it (`xact-planner`) and, if a
 //! plan exists, actually runs it (`xact-executor`): `£ CREATE ...` really
 //! creates the file or directory via the real `bank` binary, `£ SEE ...`
-//! really shows it via `gls` (directories) or `bat` (files), and
-//! `£ RUN ...` really spawns the process and waits for it to exit. Every
-//! other verb reports itself unsupported rather than silently doing
-//! nothing.
+//! really shows it via `gls` (directories) or `bat` (files), `£ RUN ...`
+//! really spawns the process and waits for it to exit, and
+//! `£ BOUND ... to ...` really aggregates a source directory via the real
+//! `bound` binary (Xact–Mesut Integration Phase 6). Every other verb
+//! reports itself unsupported rather than silently doing nothing.
 //!
 //! Scheduling (spec section 23, Xact–Mesut Integration Phase 3): with no
 //! `! CONCURRENTLY`/`! CONSECUTIVELY` stated, or under `! CONSECUTIVELY`,
@@ -139,6 +140,12 @@ fn print_outcome(branch: Option<&str>, outcome: &ExecutionOutcome) {
             };
             println!("{prefix}ran '{command_line}' — {status}");
         }
+        ExecutionOutcome::Bounded { source, destination } => match destination {
+            Some(destination) => {
+                println!("{prefix}bound: aggregated {} to {}", source.display(), destination.display());
+            }
+            None => println!("{prefix}bound: aggregated {} to the clipboard", source.display()),
+        },
         ExecutionOutcome::Failed { message } => {
             println!("{prefix}execution failed: {message}");
         }

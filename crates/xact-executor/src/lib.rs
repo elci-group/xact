@@ -27,13 +27,21 @@
 //! `join`/`try_join` report (spec section 19).
 //!
 //! [`execute`]/[`execute_concurrent`] both take a `ResourceBudget` (spec
-//! section 22, Xact–Mesut Integration Phase 5) and apply it only to
-//! `ExecutionPlan::Run` — `xact-process` (via `xact-resource`'s real
-//! cgroup v2 enforcement) is what actually constrains it.
-//! `Bank`/`ViewDirectory`/`ViewFile` ignore the budget for now: `bank`/
-//! `gls`/`bat` are typically short-lived, and every spec/directive
-//! example of `SPEND`/`SAVE` pairs it with `RUN` — widening enforcement
-//! to those is a scope decision to make later, not an oversight here.
+//! section 22, Xact–Mesut Integration Phase 5) and apply it to
+//! `ExecutionPlan::Run` and `ExecutionPlan::Bound` — `xact-process`/
+//! `xact-bound` (via `xact-resource`'s real cgroup v2 enforcement) are
+//! what actually constrain them. `Bank`/`ViewDirectory`/`ViewFile` ignore
+//! the budget for now: `bank`/`gls`/`bat` are typically short-lived, and
+//! every spec/directive example of `SPEND`/`SAVE` pairs it with `RUN` —
+//! widening enforcement to those is a scope decision to make later, not
+//! an oversight here.
+//!
+//! `ExecutionPlan::Bound` (Xact–Mesut Integration Phase 6 — "route
+//! appropriate BANK/BOUND operations through the unified execution
+//! path") goes through the exact same `execute`/`execute_concurrent`
+//! dispatch, the same `ResourceBudget` plumbing, and the same
+//! `Pending`/lifecycle-event machinery as every other verb — no
+//! special-casing, which is the actual meaning of "unified."
 
 use std::path::PathBuf;
 
@@ -55,6 +63,9 @@ pub enum ExecutionOutcome {
         success: bool,
         code: Option<i32>,
     },
+    /// A source set was aggregated via `bound` — `destination` names
+    /// where, or `None` for `bound`'s own clipboard default.
+    Bounded { source: PathBuf, destination: Option<PathBuf> },
     Failed { message: String },
 }
 
@@ -68,6 +79,11 @@ pub fn execute(plan: ExecutionPlan, budget: ResourceBudget) -> ExecutionOutcome 
         ExecutionPlan::Run { command_line } => {
             run_outcome(command_line.clone(), xact_mesut::run_process(command_line, budget))
         }
+        ExecutionPlan::Bound { source, destination } => bound_outcome(
+            source.clone(),
+            destination.clone(),
+            xact_mesut::bound_aggregate(source, destination, budget),
+        ),
     }
 }
 
@@ -94,6 +110,11 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
         ExecutionPlan::Run { command_line } => xact_mesut::run_process_async(command_line.clone(), budget)
             .map(|task| Pending(PendingKind::Run { command_line, task }))
             .map_err(submission_failed),
+        ExecutionPlan::Bound { source, destination } => {
+            xact_mesut::bound_aggregate_async(source.clone(), destination.clone(), budget)
+                .map(|task| Pending(PendingKind::Bound { source, destination, task }))
+                .map_err(submission_failed)
+        }
     }
 }
 
@@ -113,6 +134,11 @@ enum PendingKind {
         command_line: String,
         task: xact_mesut::PendingTask<xact_mesut::ProcessOutcome>,
     },
+    Bound {
+        source: PathBuf,
+        destination: Option<PathBuf>,
+        task: xact_mesut::PendingTask<()>,
+    },
 }
 
 impl Pending {
@@ -122,6 +148,7 @@ impl Pending {
             PendingKind::Bank { task } => bank_outcome(task.join()),
             PendingKind::View { path, tool, task } => view_outcome(path, tool, task.join()),
             PendingKind::Run { command_line, task } => run_outcome(command_line, task.join()),
+            PendingKind::Bound { source, destination, task } => bound_outcome(source, destination, task.join()),
         }
     }
 
@@ -135,6 +162,9 @@ impl Pending {
             PendingKind::Run { command_line, task } => {
                 task.try_join().map(|result| run_outcome(command_line.clone(), result))
             }
+            PendingKind::Bound { source, destination, task } => {
+                task.try_join().map(|result| bound_outcome(source.clone(), destination.clone(), result))
+            }
         }
     }
 
@@ -146,6 +176,7 @@ impl Pending {
             PendingKind::Bank { task } => task.drain_events(),
             PendingKind::View { task, .. } => task.drain_events(),
             PendingKind::Run { task, .. } => task.drain_events(),
+            PendingKind::Bound { task, .. } => task.drain_events(),
         }
     }
 }
@@ -153,6 +184,17 @@ impl Pending {
 fn bank_outcome(result: Result<PathBuf, xact_mesut::AdapterError>) -> ExecutionOutcome {
     match result {
         Ok(path) => ExecutionOutcome::BankEstablished { path },
+        Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+    }
+}
+
+fn bound_outcome(
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    result: Result<(), xact_mesut::AdapterError>,
+) -> ExecutionOutcome {
+    match result {
+        Ok(()) => ExecutionOutcome::Bounded { source, destination },
         Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
     }
 }
@@ -271,6 +313,52 @@ mod tests {
         let budget = ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
         let outcome = execute(ExecutionPlan::Run { command_line: "true".into() }, budget);
         assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
+    }
+
+    #[test]
+    fn bound_plan_actually_aggregates_a_real_directory() {
+        let dir = std::env::temp_dir().join(format!("xact-executor-bound-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        let out = dir.join("bundle.txt");
+
+        let outcome = execute(
+            ExecutionPlan::Bound { source: dir.clone(), destination: Some(out.clone()) },
+            ResourceBudget::default(),
+        );
+
+        assert_eq!(outcome, ExecutionOutcome::Bounded { source: dir.clone(), destination: Some(out.clone()) });
+        assert!(out.is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_bound_plan_reports_via_try_join() {
+        let dir = std::env::temp_dir().join(format!("xact-executor-bound-concurrent-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        let out = dir.join("bundle.txt");
+
+        let mut branch = execute_concurrent(
+            ExecutionPlan::Bound { source: dir.clone(), destination: Some(out.clone()) },
+            ResourceBudget::default(),
+        )
+        .unwrap_or_else(|outcome| panic!("submission should be admitted: {outcome:?}"));
+
+        let outcome = loop {
+            if let Some(outcome) = branch.try_join() {
+                break outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+
+        assert_eq!(outcome, ExecutionOutcome::Bounded { source: dir.clone(), destination: Some(out.clone()) });
+        assert!(out.is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
