@@ -16,3 +16,4 @@ xact-executor = { workspace = true }
 xact-mesut = { workspace = true }
 xact-cancel = { workspace = true }
 ctrlc = "3"
+reedline = "0.38"

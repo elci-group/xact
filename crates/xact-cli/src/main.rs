@@ -75,12 +75,209 @@
 //! lexer treats newlines as ordinary whitespace, so the grammar itself
 //! doesn't care whether a block is typed on one line or several.
 
-use std::io::{self, Write};
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
+use reedline::{
+    default_emacs_keybindings, Completer, DescriptionMode, EditCommand, Emacs, IdeMenu, KeyCode, KeyModifiers,
+    Keybindings, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu,
+    Signal, Span, Suggestion,
+};
 use xact_ast::{AgentBlock, AgentClause, Command, Operand, PolicyArgs, PolicyOperator, PolicyStatement};
 use xact_core::{Session, SessionOutcome};
 use xact_executor::{ExecutionOutcome, Pending};
 use xact_planner::PlanOutcome;
+
+/// The completion menu's name, shared between the keybindings that open it
+/// and the `ReedlineMenu` that's registered under it.
+const COMPLETION_MENU: &str = "completion_menu";
+
+/// Bridges `reedline`'s [`Completer`] trait to [`Session::complete`] —
+/// exactly the same deterministic, parser-reflecting + Padagonia-backed
+/// dynamic completion this crate has been building all along, just now
+/// wired into a real line editor instead of only being reachable from
+/// tests. `Arc<Mutex<_>>` (not `Rc<RefCell<_>>`: `reedline::Completer:
+/// Send`) because the menu needs read access to whatever
+/// `session`'s current policy state is (spec section 16 — singleton
+/// operators already established get filtered out) while the REPL loop
+/// below needs mutable access to the same `Session` between lines.
+struct XactCompleter {
+    session: Arc<Mutex<Session>>,
+}
+
+impl Completer for XactCompleter {
+    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        let typed = &line[..pos];
+        let start = trailing_word_start(typed);
+        let session = self.session.lock().unwrap();
+        session
+            .complete(typed)
+            .into_iter()
+            .map(|value| {
+                // Placeholders (`<path>`, `'...'`) and a directory entry
+                // that already ends in `/` invite more typing right where
+                // the cursor lands; every other candidate (a keyword, a
+                // resolved binary name, a resolved file) is a finished
+                // token, so a trailing space after accepting it is the
+                // useful default.
+                let append_whitespace =
+                    !value.starts_with('<') && !value.starts_with('\'') && !value.ends_with('/');
+                Suggestion {
+                    value,
+                    description: None,
+                    style: None,
+                    extra: None,
+                    span: Span { start, end: pos },
+                    append_whitespace,
+                }
+            })
+            .collect()
+    }
+}
+
+/// The byte offset, within `typed` (everything up to the cursor), where
+/// the word currently being typed starts — i.e. the span reedline should
+/// replace when a suggestion is accepted. Mirrors
+/// `xact-completion`'s private `trailing_partial_word`: whitespace-ended
+/// input has nothing live to replace, so the span collapses to a pure
+/// insertion point at the cursor.
+fn trailing_word_start(typed: &str) -> usize {
+    if typed.is_empty() || typed.ends_with(char::is_whitespace) {
+        return typed.len();
+    }
+    typed.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0)
+}
+
+/// A minimal two-state prompt: `xact> ` normally, `  ...> ` while reading
+/// a `@` block's continuation lines — the exact same two strings the
+/// previous bare `stdin.read_line` REPL printed, so switching to a real
+/// line editor doesn't change what the session looks like at rest.
+struct XactPrompt {
+    continuation: Cell<bool>,
+}
+
+impl XactPrompt {
+    fn new() -> Self {
+        Self { continuation: Cell::new(false) }
+    }
+
+    fn set_continuation(&self, continuation: bool) {
+        self.continuation.set(continuation);
+    }
+}
+
+impl Prompt for XactPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        if self.continuation.get() {
+            Cow::Borrowed("  ...> ")
+        } else {
+            Cow::Borrowed("xact> ")
+        }
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _edit_mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed(":::: ")
+    }
+
+    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
+        Cow::Owned(format!("(search: {}) ", search.term))
+    }
+}
+
+/// Every printable character this grammar actually uses (letters, digits,
+/// and the literal symbols `£`/`!`/`@`/`'`/`"`/`~`/`/`/`.`/`-`/`_`/`%`, plus
+/// space) is bound to insert itself *and* open/refresh the completion
+/// menu — not just `Tab` — so the candidate list narrows live on every
+/// keystroke, per the original request: options should visibly collapse
+/// as the user types, without a manual trigger first. `Backspace` gets the
+/// same treatment so deleting a character re-widens the list correctly.
+/// `Tab` still works too, both to open the menu from a stopped state and
+/// to step through candidates once it's open.
+fn add_completion_keybindings(kb: &mut Keybindings) {
+    let mut chars: Vec<char> = ('a'..='z').chain('A'..='Z').chain('0'..='9').collect();
+    chars.extend(['£', '!', '@', '\'', '"', '~', '/', '.', '-', '_', '%', ' ']);
+
+    for c in chars {
+        kb.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Char(c),
+            ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![EditCommand::InsertChar(c)]),
+                ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+            ]),
+        );
+        // crossterm/terminal-dependent: a physically shifted letter can be
+        // reported either as its own char under KeyModifiers::NONE (bound
+        // just above) or as the lowercase char under KeyModifiers::SHIFT —
+        // Emacs::parse_event looks up the lowercased char for any non-NONE
+        // modifier, so both real reporting conventions are covered.
+        if c.is_ascii_lowercase() {
+            let upper = c.to_ascii_uppercase();
+            kb.add_binding(
+                KeyModifiers::SHIFT,
+                KeyCode::Char(c),
+                ReedlineEvent::Multiple(vec![
+                    ReedlineEvent::Edit(vec![EditCommand::InsertChar(upper)]),
+                    ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+                ]),
+            );
+        }
+    }
+
+    kb.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Backspace,
+        ReedlineEvent::Multiple(vec![
+            ReedlineEvent::Edit(vec![EditCommand::Backspace]),
+            ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+        ]),
+    );
+
+    kb.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![ReedlineEvent::Menu(COMPLETION_MENU.to_string()), ReedlineEvent::MenuNext]),
+    );
+    kb.add_binding(KeyModifiers::SHIFT, KeyCode::BackTab, ReedlineEvent::MenuPrevious);
+}
+
+/// Builds the live line editor: `XactCompleter` (backed by `session`) as
+/// the candidate source, an `IdeMenu` dropdown wired to open/refresh on
+/// every keystroke (see [`add_completion_keybindings`]) rather than only
+/// on an explicit `Tab`.
+fn build_line_editor(session: Arc<Mutex<Session>>) -> Reedline {
+    let completer = Box::new(XactCompleter { session });
+
+    let menu = Box::new(
+        IdeMenu::default()
+            .with_name(COMPLETION_MENU)
+            .with_min_completion_width(0)
+            .with_max_completion_width(60)
+            .with_max_completion_height(u16::MAX)
+            .with_padding(1)
+            .with_cursor_offset(0)
+            .with_description_mode(DescriptionMode::PreferRight)
+            .with_correct_cursor_pos(false)
+            .with_default_border(),
+    );
+
+    let mut keybindings = default_emacs_keybindings();
+    add_completion_keybindings(&mut keybindings);
+
+    Reedline::create()
+        .with_completer(completer)
+        .with_menu(ReedlineMenu::EngineCompleter(menu))
+        .with_edit_mode(Box::new(Emacs::new(keybindings)))
+}
 
 /// A concurrent branch admitted under `! CONCURRENTLY` but not yet
 /// joined, tagged with a stable id (so a later `WHEN` clause can block on
@@ -311,28 +508,33 @@ fn main() {
 
     println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE, SEE, and RUN actually run");
     println!("Type a £ command, a ! policy statement, an @ agent block, or 'exit'.");
+    println!("Suggestions narrow live as you type; Tab cycles them, Enter accepts the line.");
 
-    let mut session = Session::new();
-    let stdin = io::stdin();
+    // `Session` is shared (not owned outright) by this loop: `XactCompleter`
+    // (inside `line_editor`) needs read access to the same live policy
+    // state (spec section 16 — already-established singleton operators
+    // drop out of the suggestion list) that this loop mutates between
+    // lines. See `XactCompleter`'s doc comment.
+    let session = Arc::new(Mutex::new(Session::new()));
+    let mut line_editor = build_line_editor(Arc::clone(&session));
+    let prompt = XactPrompt::new();
+
     let mut pending: PendingBranches = Vec::new();
     let mut next_branch_id: u64 = 0;
     let mut last_result = LastResult::Resolved;
 
     loop {
-        drain_ready(&mut pending, &mut session, &mut last_result);
+        drain_ready(&mut pending, &mut session.lock().unwrap(), &mut last_result);
 
-        print!("xact> ");
-        if io::stdout().flush().is_err() {
-            join_all(pending);
-            break;
-        }
-
-        let mut line = String::new();
-        if stdin.read_line(&mut line).unwrap_or(0) == 0 {
-            join_all(pending);
-            break;
-        }
-        let line = line.trim_end().to_string();
+        prompt.set_continuation(false);
+        let line = match line_editor.read_line(&prompt) {
+            Ok(Signal::Success(buffer)) => buffer.trim_end().to_string(),
+            Ok(Signal::CtrlC) => continue,
+            Ok(Signal::CtrlD) | Err(_) => {
+                join_all(pending);
+                break;
+            }
+        };
         if line.is_empty() {
             continue;
         }
@@ -344,23 +546,28 @@ fn main() {
         let mut input = line.clone();
         if line.trim_start().starts_with('@') {
             loop {
-                print!("  ...> ");
-                if io::stdout().flush().is_err() {
-                    break;
-                }
-                let mut cont = String::new();
-                if stdin.read_line(&mut cont).unwrap_or(0) == 0 {
-                    break;
-                }
-                if cont.trim().is_empty() {
+                prompt.set_continuation(true);
+                let cont = match line_editor.read_line(&prompt) {
+                    Ok(Signal::Success(buffer)) => buffer.trim().to_string(),
+                    _ => break,
+                };
+                if cont.is_empty() {
                     break;
                 }
                 input.push(' ');
-                input.push_str(cont.trim());
+                input.push_str(&cont);
             }
         }
 
-        match session.submit(&input) {
+        // Bound to a plain `let` rather than matched inline: `match`
+        // extends a scrutinee's temporaries across every arm, so an
+        // inline `match session.lock().unwrap().submit(&input) { ... }`
+        // would hold the lock for the whole match — including the arms
+        // below that lock `session` again, which would deadlock (a
+        // `Mutex` isn't reentrant). Binding first drops the guard the
+        // instant `submit` returns its owned `SessionOutcome`.
+        let outcome = session.lock().unwrap().submit(&input);
+        match outcome {
             SessionOutcome::Accepted(command) => {
                 let description = describe(&command);
                 println!("accepted: {description}");
@@ -372,10 +579,10 @@ fn main() {
 
                 if let Some(dependency) = dependency {
                     if let LastResult::Pending(id) = last_result {
-                        resolve_branch_now(id, &mut pending, &mut session);
+                        resolve_branch_now(id, &mut pending, &mut session.lock().unwrap());
                         last_result = LastResult::Resolved;
                     }
-                    if !session.dependency_satisfied(&dependency) {
+                    if !session.lock().unwrap().dependency_satisfied(&dependency) {
                         println!(
                             "  skipped: WHEN {} {} was not satisfied.",
                             dependency.reference.as_str(),
@@ -385,15 +592,15 @@ fn main() {
                     }
                 }
 
-                let plan_outcome = xact_planner::plan(&command, session.references());
-                let budget = session.resource_budget();
-                let concurrent = session.schedule() == Some(PolicyOperator::Concurrently);
+                let plan_outcome = xact_planner::plan(&command, session.lock().unwrap().references());
+                let budget = session.lock().unwrap().resource_budget();
+                let concurrent = session.lock().unwrap().schedule() == Some(PolicyOperator::Concurrently);
                 dispatch(
                     plan_outcome,
                     budget,
                     description,
                     concurrent,
-                    &mut session,
+                    &mut session.lock().unwrap(),
                     &mut pending,
                     &mut next_branch_id,
                     &mut last_result,
@@ -412,15 +619,15 @@ fn main() {
             SessionOutcome::AgentAccepted(block) => {
                 let description = describe_agent(&block);
                 println!("agent intent accepted: {description}");
-                let plan_outcome = xact_planner::plan_agent(&block, session.references());
-                let budget = session.resource_budget();
-                let concurrent = session.schedule() == Some(PolicyOperator::Concurrently);
+                let plan_outcome = xact_planner::plan_agent(&block, session.lock().unwrap().references());
+                let budget = session.lock().unwrap().resource_budget();
+                let concurrent = session.lock().unwrap().schedule() == Some(PolicyOperator::Concurrently);
                 dispatch(
                     plan_outcome,
                     budget,
                     description,
                     concurrent,
-                    &mut session,
+                    &mut session.lock().unwrap(),
                     &mut pending,
                     &mut next_branch_id,
                     &mut last_result,
