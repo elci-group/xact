@@ -1,3 +1,5 @@
+<img src="assets/xact-logo.svg" alt="" width="96" height="96" align="left">
+
 # Xact
 
 Xact is a deterministic, semantic shell for the ELCi ecosystem. Instead of asking a
@@ -5,6 +7,10 @@ user to construct executable shell commands by hand, it accepts a small, typed
 imperative language and turns each accepted line into a real, executed action —
 composing real sibling tools (`bank`, `gls`, `bat`, `bound`) and a real local agent
 provider (`ollama`) rather than reimplementing what they already do.
+
+<br clear="left">
+
+![xact demo: £ CREATE, £ SEE, ! SPEND, and £ RUN, all executing for real](assets/xact-demo.gif)
 
 ## What it does
 

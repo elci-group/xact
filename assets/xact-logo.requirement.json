@@ -1,0 +1,62 @@
+{
+  "id": "xact-primary-logo",
+  "revision": 1,
+  "namespace": {
+    "tenant": "elci-group",
+    "project": "xact",
+    "application": "brand"
+  },
+  "source": "user",
+  "semantic_role": "Represent Xact, a deterministic semantic shell, as a standalone mark",
+  "asset_type": "logo",
+  "surface": {
+    "name": "master.primary_logo",
+    "width": 512,
+    "height": 512,
+    "theme": "any"
+  },
+  "purpose": "Give Xact a recognizable, provider-neutral primary mark for its README and docs",
+  "constraints": {
+    "required_format": "svg",
+    "max_bytes": 65536,
+    "max_pixels": 262144,
+    "transparent_background": true
+  },
+  "priority": "high",
+  "brand_context": {
+    "id": "xact-default",
+    "revision": 1,
+    "palette": ["#0F172A", "#22C55E", "#F8FAFC"],
+    "visual_language": {
+      "geometry": { "value": "geometric", "source": "requested" },
+      "complexity": { "value": "restrained", "source": "requested" },
+      "density": { "value": "sparse", "source": "requested" },
+      "contrast": { "value": "high", "source": "requested" },
+      "corner_language": { "value": "sharp", "source": "requested" },
+      "lighting": { "value": "flat", "source": "requested" },
+      "depth": { "value": "low", "source": "requested" },
+      "texture": { "value": "minimal", "source": "requested" },
+      "illustration_style": { "value": "technical-editorial", "source": "requested" }
+    },
+    "forbidden_motifs": ["photorealistic people", "gradients", "generic terminal window icon"]
+  },
+  "required_variants": ["master", "dark", "light"],
+  "target_context": {
+    "segments": [
+      {
+        "name": "elci_ecosystem_engineers",
+        "description": "Engineers building or evaluating the elci-group tool ecosystem, evaluating Xact as the ecosystem's semantic shell",
+        "pains": ["shells that require memorizing exact syntax", "tools that fake success instead of reporting real outcomes"]
+      }
+    ],
+    "narratives": [
+      {
+        "capability": "deterministic grammar, real execution",
+        "narrative": "every accepted command is grammatically resolved before anything runs, and every outcome shown is a real result, not a simulation",
+        "audiences": ["elci_ecosystem_engineers"],
+        "formats": ["github_readme", "docs"]
+      }
+    ],
+    "placements": ["github_readme_hero", "docs_architecture_diagram", "cli_terminal_banner"]
+  }
+}
