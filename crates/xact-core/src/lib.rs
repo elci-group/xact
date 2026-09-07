@@ -80,9 +80,19 @@ impl Session {
 
     /// Deterministic valid-next-token suggestions for the given draft
     /// input (spec section 15), filtered for policy operators already
-    /// singleton-established in this session (spec section 16).
+    /// singleton-established in this session (spec section 16). Static
+    /// grammar suggestions (keywords, operators, placeholders) always take
+    /// priority; real-world dynamic candidates — installed binaries after
+    /// `RUN`, real filesystem entries after an ownership keyword — only
+    /// ever apply once the static list has nothing left to say (see
+    /// `xact-completion-graph`'s module doc for why that's the correct
+    /// boundary between the two).
     pub fn complete(&self, input: &str) -> Vec<String> {
-        self.policy.filter_suggestions(xact_completion::complete(input))
+        let static_suggestions = self.policy.filter_suggestions(xact_completion::complete(input));
+        if !static_suggestions.is_empty() {
+            return static_suggestions;
+        }
+        xact_completion_graph::dynamic_complete(input)
     }
 
     /// This session's resolved-reference state, for a caller that wants to

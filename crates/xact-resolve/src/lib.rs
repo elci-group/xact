@@ -1,0 +1,458 @@
+//! The single, real-world resolution engine both execution
+//! (`xact-process`, `xact-planner`) and autocomplete (`xact-cli`, via
+//! `xact-completion-graph`) call into. Neither of those ever re-derives a
+//! search-directory list or a fallback rule on its own — they ask this
+//! crate, which asks the same Padagonia-backed ontology graph either way.
+//! Before this crate existed, `xact-process` had its own `SYSTEM_BIN_DIRS`
+//! + directory scan, `xact-planner` had its own `~` expansion, and an
+//! earlier draft of autocomplete had a *third*, independent copy of both —
+//! three places that had to be kept in sync by hand, and weren't
+//! guaranteed to be. That's exactly the failure mode this crate closes:
+//! there is now exactly one fact ("what directories does `OUR` search, in
+//! what order") and exactly one algorithm per operation ("does this
+//! directory list contain a match"), and every caller — whether it wants
+//! one definitive answer (execution) or every matching candidate
+//! (completion) — reads the same graph and calls the same functions.
+//!
+//! The ontology graph itself only ever holds two kinds of real fact:
+//! which [`ResolverKind`] applies to which [`xact_ast::Verb`], and which
+//! real directories `OUR`'s system-binary search consults, in what order.
+//! It does not encode the grammar (that stays `xact-parser`'s job, per
+//! `xact-completion`'s module doc) and it does not encode *when* a
+//! fallback fires (that's real control flow — "try `$PATH` first, only
+//! fall back to `OUR`'s directories on a genuine miss" — which lives in
+//! [`search_dirs_for`]/[`list_binaries`] as ordinary Rust, reading facts
+//! out of the graph rather than hardcoding them a second time).
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use padagonia::{NodeId, Provenance, QueryEngine, Scalar, Store};
+use xact_ast::{OwnershipKind, Verb};
+
+/// The real-world sources this build knows how to resolve against. Every
+/// variant has an actual implementation below (`$PATH`/filesystem scans) —
+/// this is the exhaustive set of resolvers this build genuinely has, not
+/// an extensible plugin list.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ResolverKind {
+    InstalledBinary,
+    FilesystemPath,
+}
+
+impl ResolverKind {
+    const ALL: [ResolverKind; 2] = [ResolverKind::InstalledBinary, ResolverKind::FilesystemPath];
+
+    fn label(self) -> &'static str {
+        match self {
+            ResolverKind::InstalledBinary => "installed_binary",
+            ResolverKind::FilesystemPath => "filesystem_path",
+        }
+    }
+}
+
+/// The standard POSIX/Linux system binary directories, in search order —
+/// the same list most Linux `sudo` configurations use as `secure_path`.
+/// This is the one place this literal list is written down; everything
+/// else reads it back out of the graph via [`system_bin_dirs`].
+const SYSTEM_BIN_DIRS: &[&str] = &["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"];
+
+fn provenance(evidence: &str) -> Provenance {
+    Provenance::new("xact-resolve", "hand-authored", 1.0, 0.0, 0, vec![evidence.to_string()])
+}
+
+/// Builds the ontology graph fresh: a couple dozen nodes/edges derived
+/// entirely from [`xact_ast::Verb::ALL`] and [`SYSTEM_BIN_DIRS`] — cheap
+/// enough to rebuild per call, and sidesteps needing `Store` to be shared
+/// across threads or kept alive between calls.
+fn build_graph() -> (Store, HashMap<&'static str, NodeId>) {
+    let mut store = Store::new();
+
+    let mut resolver_nodes = HashMap::new();
+    for resolver in ResolverKind::ALL {
+        let id = store.add_node(
+            "Resolver",
+            vec![("kind", Scalar::String(resolver.label().to_string()))],
+            None,
+            provenance("Resolver catalog: the real-world sources this build can query."),
+        );
+        resolver_nodes.insert(resolver.label(), id);
+    }
+
+    let mut verb_nodes = HashMap::new();
+    for verb in Verb::ALL {
+        let id = store.add_node(
+            "Verb",
+            vec![("name", Scalar::String(verb.as_str().to_string()))],
+            None,
+            provenance("Verb catalog: xact_ast::Verb::ALL."),
+        );
+        verb_nodes.insert(verb.as_str(), id);
+    }
+
+    let filesystem_path = resolver_nodes[ResolverKind::FilesystemPath.label()];
+    for verb in [
+        Verb::See,
+        Verb::Edit,
+        Verb::Move,
+        Verb::Copy,
+        Verb::Paste,
+        Verb::Cut,
+        Verb::Delete,
+        Verb::Create,
+        Verb::Bound,
+    ] {
+        store.add_edge(
+            verb_nodes[verb.as_str()],
+            filesystem_path,
+            "resolves_via",
+            vec![],
+            None,
+            provenance("This verb's operand/destination is a filesystem path (xact-ast::Operand::Owned)."),
+        );
+    }
+
+    let installed_binary = resolver_nodes[ResolverKind::InstalledBinary.label()];
+    store.add_edge(
+        verb_nodes[Verb::Run.as_str()],
+        installed_binary,
+        "resolves_via",
+        vec![],
+        None,
+        provenance("RUN's operand names a real binary — MY searches $PATH, OUR the system directories below."),
+    );
+
+    for (order, dir) in SYSTEM_BIN_DIRS.iter().enumerate() {
+        let dir_node = store.add_node(
+            "Directory",
+            vec![("path", Scalar::String((*dir).to_string())), ("order", Scalar::I64(order as i64))],
+            None,
+            provenance("OUR's real system binary directories, in search order."),
+        );
+        store.add_edge(
+            installed_binary,
+            dir_node,
+            "searches",
+            vec![("order", Scalar::I64(order as i64))],
+            None,
+            provenance("OUR's real system binary directories, in search order."),
+        );
+    }
+
+    (store, verb_nodes)
+}
+
+/// The resolver kinds registered for `verb`, per the ontology graph — the
+/// same lookup `xact-cli`'s autocomplete uses to decide whether a verb's
+/// trailing operand is worth resolving at all.
+pub fn resolvers_for(verb: Verb) -> Vec<ResolverKind> {
+    let (store, verb_nodes) = build_graph();
+    let Some(&node) = verb_nodes.get(verb.as_str()) else {
+        return Vec::new();
+    };
+    let query = QueryEngine::new(&store);
+    query
+        .outgoing(node, None)
+        .into_iter()
+        .filter_map(|edge| store.nodes().get(&edge.dst))
+        .filter_map(|resolver_node| scalar_string(&store, resolver_node, "kind"))
+        .filter_map(|kind| ResolverKind::ALL.into_iter().find(|r| r.label() == kind))
+        .collect()
+}
+
+/// `OUR`'s real system binary search directories, in order, straight out
+/// of the graph — the single source both [`search_dirs_for`] (execution
+/// and completion's shared fallback rule) and [`list_binaries`] read.
+pub fn system_bin_dirs() -> Vec<PathBuf> {
+    let (store, _) = build_graph();
+    let query = QueryEngine::new(&store);
+    let Some(installed_binary) = find_resolver_node(&store, ResolverKind::InstalledBinary) else {
+        return Vec::new();
+    };
+
+    let mut dirs: Vec<(i64, PathBuf)> = query
+        .outgoing(installed_binary, None)
+        .into_iter()
+        .filter_map(|edge| {
+            let dir_node = store.nodes().get(&edge.dst)?;
+            let path = scalar_string(&store, dir_node, "path")?;
+            let order = scalar_i64(&store, dir_node, "order").unwrap_or(0);
+            Some((order, PathBuf::from(path)))
+        })
+        .collect();
+    dirs.sort_by_key(|(order, _)| *order);
+    dirs.into_iter().map(|(_, path)| path).collect()
+}
+
+fn find_resolver_node(store: &Store, kind: ResolverKind) -> Option<NodeId> {
+    store.nodes().iter().find_map(|(id, node)| {
+        let s = scalar_string(store, node, "kind")?;
+        (s == kind.label()).then_some(*id)
+    })
+}
+
+fn scalar_string(store: &Store, node: &padagonia::Node, key: &str) -> Option<String> {
+    node.properties.iter().find_map(|(k, v)| {
+        let name = store.string_table().resolve(k.0)?;
+        if name != key {
+            return None;
+        }
+        match v {
+            Scalar::String(s) => Some(s.clone()),
+            _ => None,
+        }
+    })
+}
+
+fn scalar_i64(store: &Store, node: &padagonia::Node, key: &str) -> Option<i64> {
+    node.properties.iter().find_map(|(k, v)| {
+        let name = store.string_table().resolve(k.0)?;
+        if name != key {
+            return None;
+        }
+        match v {
+            Scalar::I64(n) => Some(*n),
+            _ => None,
+        }
+    })
+}
+
+/// The real search directories `domain` consults for a binary lookup, in
+/// priority order — the exact same list `xact-process`'s `RUN` fallback
+/// and this crate's own [`list_binaries`] both read: `THEIR` never
+/// consults a directory list ($PATH only, no fallback), `MY` and `OUR`
+/// both fall back to (or, for `OUR`, search directly) [`system_bin_dirs`].
+pub fn search_dirs_for(domain: OwnershipKind) -> Vec<PathBuf> {
+    match domain {
+        OwnershipKind::My | OwnershipKind::Our => system_bin_dirs(),
+        OwnershipKind::Their => Vec::new(),
+    }
+}
+
+/// The first directory in `dirs` containing an executable file named
+/// exactly `program`, if any — a real filesystem check, shared by
+/// execution (looking for one definitive answer) and, transitively via
+/// [`list_binaries`], completion (enumerating every match).
+pub fn find_binary_in_dirs(program: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    dirs.iter().map(|dir| dir.join(program)).find(|candidate| candidate.is_file())
+}
+
+/// Expands a leading `~/` or bare `~` against the real `$HOME`; every
+/// other (relative or absolute) path is returned as-is, matching normal
+/// shell convention. The one real implementation — `xact-planner` calls
+/// this for every path it resolves before executing anything, and
+/// `xact-completion-graph` calls it for the same path before listing what
+/// real filesystem entries match.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    } else if path == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(path)
+}
+
+/// Real installed binaries whose name starts with `prefix`, searched under
+/// exactly the directories `domain` would use to resolve *one* program
+/// (see [`search_dirs_for`]) — plus `$PATH` itself for `MY`/`THEIR`, since
+/// that's genuinely part of their real search surface (an OS `execvp`-style
+/// `$PATH` search doesn't enumerate — it only ever answers "does this one
+/// name resolve" — so listing candidates has to walk `$PATH`'s directories
+/// itself; `OUR` deliberately never consults `$PATH` at all, matching
+/// `xact-process`'s `our_domain_never_consults_path` behavior).
+pub fn list_binaries(prefix: &str, domain: OwnershipKind) -> Vec<String> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if domain != OwnershipKind::Our {
+        if let Some(path) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&path));
+        }
+    }
+    for dir in search_dirs_for(domain) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+
+    let mut matches: Vec<String> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !name.starts_with(prefix) || !is_executable_file(&entry) {
+                continue;
+            }
+            matches.push(name);
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    matches.truncate(50);
+    matches
+}
+
+/// Real matching entries under whatever directory `partial` names so far —
+/// a genuine `read_dir` against `expand_tilde(partial)`'s parent, not a
+/// fabricated listing. Directories get a trailing `/` so the next
+/// keystroke can keep descending.
+pub fn list_path_entries(partial: &str) -> Vec<String> {
+    let (dir_part, name_prefix) = match partial.rfind('/') {
+        Some(idx) => (&partial[..=idx], &partial[idx + 1..]),
+        None => ("", partial),
+    };
+    let dir = expand_tilde(dir_part);
+    let dir = if dir_part.is_empty() { PathBuf::from(".") } else { dir };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    let mut matches: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if !name.starts_with(name_prefix) {
+                return None;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let mut candidate = format!("{dir_part}{name}");
+            if is_dir {
+                candidate.push('/');
+            }
+            Some(candidate)
+        })
+        .collect();
+    matches.sort();
+    matches.truncate(50);
+    matches
+}
+
+#[cfg(unix)]
+fn is_executable_file(entry: &std::fs::DirEntry) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = entry.metadata() else {
+        return false;
+    };
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(entry: &std::fs::DirEntry) -> bool {
+    entry.metadata().map(|m| m.is_file()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn resolvers_for_run_is_installed_binary_only() {
+        assert_eq!(resolvers_for(Verb::Run), vec![ResolverKind::InstalledBinary]);
+    }
+
+    #[test]
+    fn resolvers_for_see_is_filesystem_path_only() {
+        assert_eq!(resolvers_for(Verb::See), vec![ResolverKind::FilesystemPath]);
+    }
+
+    #[test]
+    fn system_bin_dirs_matches_the_real_standard_locations_in_order() {
+        let dirs = system_bin_dirs();
+        assert_eq!(dirs, SYSTEM_BIN_DIRS.iter().map(PathBuf::from).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn our_never_includes_path_in_search_dirs() {
+        // search_dirs_for itself only ever returns system_bin_dirs or
+        // nothing — $PATH inclusion is list_binaries' job, and only for
+        // non-OUR domains.
+        assert_eq!(search_dirs_for(OwnershipKind::Our), system_bin_dirs());
+    }
+
+    #[test]
+    fn their_never_falls_back_to_a_directory_list() {
+        assert!(search_dirs_for(OwnershipKind::Their).is_empty());
+    }
+
+    #[test]
+    fn find_binary_in_dirs_locates_a_real_executable() {
+        let dir = std::env::temp_dir().join(format!("xact-resolve-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("xact-resolve-stub");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(&script, perms).unwrap();
+
+        let found = find_binary_in_dirs("xact-resolve-stub", &[dir.clone()]);
+        assert_eq!(found, Some(script));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_tilde_resolves_against_real_home() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~/x"), PathBuf::from(home).join("x"));
+        assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
+    }
+
+    #[test]
+    fn list_binaries_finds_a_real_system_binary() {
+        // "ls" (not the single letter "l") stays well under the 50-match
+        // cap even on a machine with a very broad $PATH.
+        let matches = list_binaries("ls", OwnershipKind::My);
+        assert!(matches.contains(&"ls".to_string()), "{matches:?}");
+    }
+
+    /// `PATH` is process-global mutable state, and cargo runs tests in
+    /// parallel by default, so both assertions live in one test (same
+    /// rationale as `xact-see`'s `see_adapter_dispatches_by_tool_name`)
+    /// rather than risking one test observing another's temporary `PATH`
+    /// override.
+    #[test]
+    fn our_domain_never_searches_path_even_for_a_real_path_only_binary() {
+        let dir = std::env::temp_dir().join(format!("xact-resolve-list-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("xact-resolve-list-stub");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(&script, perms).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", &dir);
+
+        let my_matches = list_binaries("xact-resolve-list-stub", OwnershipKind::My);
+        let our_matches = list_binaries("xact-resolve-list-stub", OwnershipKind::Our);
+
+        match original_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        fs::remove_dir_all(&dir).ok();
+
+        assert!(my_matches.contains(&"xact-resolve-list-stub".to_string()), "{my_matches:?}");
+        assert!(our_matches.is_empty(), "OUR must never search $PATH: {our_matches:?}");
+    }
+
+    #[test]
+    fn list_path_entries_finds_real_filesystem_matches() {
+        let dir = std::env::temp_dir().join(format!("xact-resolve-path-test-{}", std::process::id()));
+        fs::create_dir_all(dir.join("alpha")).unwrap();
+        fs::write(dir.join("beta.txt"), b"x").unwrap();
+
+        let input = format!("{}/al", dir.display());
+        let matches = list_path_entries(&input);
+        assert_eq!(matches, vec![format!("{}/alpha/", dir.display())]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+}

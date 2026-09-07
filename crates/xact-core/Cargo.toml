@@ -10,6 +10,7 @@ xact-parser = { workspace = true }
 xact-semantic = { workspace = true }
 xact-reference = { workspace = true }
 xact-completion = { workspace = true }
+xact-completion-graph = { workspace = true }
 xact-diagnostics = { workspace = true }
 xact-policy = { workspace = true }
 xact-agent = { workspace = true }

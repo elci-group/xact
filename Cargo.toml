@@ -13,6 +13,8 @@ xact-lexer = { path = "crates/xact-lexer" }
 xact-parser = { path = "crates/xact-parser" }
 xact-diagnostics = { path = "crates/xact-diagnostics" }
 xact-completion = { path = "crates/xact-completion" }
+xact-completion-graph = { path = "crates/xact-completion-graph" }
+xact-resolve = { path = "crates/xact-resolve" }
 xact-reference = { path = "crates/xact-reference" }
 xact-semantic = { path = "crates/xact-semantic" }
 xact-policy = { path = "crates/xact-policy" }
@@ -33,3 +35,4 @@ xact-core = { path = "crates/xact-core" }
 
 mesut = { path = "../mesut/crates/mesut" }
 mesut-observe = { path = "../mesut/crates/mesut-observe" }
+padagonia = { path = "../padagonia" }

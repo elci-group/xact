@@ -8,3 +8,4 @@ license.workspace = true
 xact-ast = { workspace = true }
 xact-resource = { workspace = true }
 xact-cancel = { workspace = true }
+xact-resolve = { workspace = true }

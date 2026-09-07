@@ -2,10 +2,12 @@
 //! native vs ELci-tool-backed execution (section 21).
 //!
 //! This is where `Operand`s get resolved into concrete values — expanding
-//! `THIS`/`THAT` against the [`ReferenceContext`] and `~` against `$HOME` —
-//! completing the `ObjectRef -> ResolvedObject -> TypedResource` pipeline
-//! spec section 11 describes (a resolved path is as far as "typed" goes so
-//! far; there is no filesystem-vs-process distinction yet).
+//! `THIS`/`THAT` against the [`ReferenceContext`] and `~` against `$HOME`
+//! (via `xact-resolve`, the same real path-expansion `xact-cli`'s
+//! autocomplete uses) — completing the `ObjectRef -> ResolvedObject ->
+//! TypedResource` pipeline spec section 11 describes (a resolved path is
+//! as far as "typed" goes so far; there is no filesystem-vs-process
+//! distinction yet).
 //!
 //! Scope so far: `CREATE` maps to the `bank` tool, `SEE` maps to `gls`
 //! (directories) or `bat` (files), `RUN` maps to native process
@@ -86,7 +88,7 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             match resolve_path(operand, references) {
                 Some(path) => PlanOutcome::Plan(ExecutionPlan::Bank {
-                    path: expand_tilde(&path),
+                    path: xact_resolve::expand_tilde(&path),
                 }),
                 None => PlanOutcome::Unsupported("CREATE's target did not resolve to a path.".into()),
             }
@@ -97,7 +99,7 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             match resolve_path(operand, references) {
                 Some(raw) => {
-                    let path = expand_tilde(&raw);
+                    let path = xact_resolve::expand_tilde(&raw);
                     if path.is_dir() {
                         PlanOutcome::Plan(ExecutionPlan::ViewDirectory { path })
                     } else if path.is_file() {
@@ -132,12 +134,12 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             let destination = match &cmd.destination {
                 Some(dest_operand) => match resolve_path(dest_operand, references) {
-                    Some(raw) => Some(expand_tilde(&raw)),
+                    Some(raw) => Some(xact_resolve::expand_tilde(&raw)),
                     None => return PlanOutcome::Unsupported("BOUND's destination did not resolve to a path.".into()),
                 },
                 None => None,
             };
-            PlanOutcome::Plan(ExecutionPlan::Bound { source: expand_tilde(&raw_source), destination })
+            PlanOutcome::Plan(ExecutionPlan::Bound { source: xact_resolve::expand_tilde(&raw_source), destination })
         }
         other => PlanOutcome::Unsupported(format!("{} has no execution plan yet.", other.as_str())),
     }
@@ -163,14 +165,14 @@ pub fn plan_agent(block: &AgentBlock, references: &ReferenceContext) -> PlanOutc
 
     let reading = match block.clause(AgentClauseKind::Reading) {
         Some(AgentClause::Reading { operand, .. }) => match resolve_path(operand, references) {
-            Some(raw) => Some(expand_tilde(&raw)),
+            Some(raw) => Some(xact_resolve::expand_tilde(&raw)),
             None => return PlanOutcome::Unsupported("TELL's READING target did not resolve to a path.".into()),
         },
         _ => None,
     };
     let populating = match block.clause(AgentClauseKind::Populating) {
         Some(AgentClause::Populating { operand, .. }) => match resolve_path(operand, references) {
-            Some(raw) => Some(expand_tilde(&raw)),
+            Some(raw) => Some(xact_resolve::expand_tilde(&raw)),
             None => return PlanOutcome::Unsupported("TELL's POPULATING target did not resolve to a path.".into()),
         },
         _ => None,
@@ -207,19 +209,6 @@ fn ownership_domain(operand: &Operand) -> OwnershipKind {
         Operand::Owned { kind, .. } => *kind,
         Operand::Reference { .. } | Operand::StringArg { .. } => OwnershipKind::My,
     }
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    } else if path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home);
-        }
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]

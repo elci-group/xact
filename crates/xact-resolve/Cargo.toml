@@ -1,10 +1,9 @@
 [package]
-name = "xact-planner"
+name = "xact-resolve"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
 xact-ast = { workspace = true }
-xact-reference = { workspace = true }
-xact-resolve = { workspace = true }
+padagonia = { workspace = true }

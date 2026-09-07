@@ -28,14 +28,17 @@
 //! process's own `$PATH`, letting `Command::new` do the actual search so
 //! `argv[0]` stays exactly what was typed when that succeeds. If `$PATH`
 //! search genuinely fails (`ErrorKind::NotFound`) and the program name is
-//! bare (no `/`), `MY` falls back to [`SYSTEM_BIN_DIRS`] — Xact's `OUR`
-//! domain, the standard POSIX system binary directories (the same list
-//! most Linux `sudo` configurations use as `secure_path`) — before giving
-//! up for real. An explicit `£ RUN OUR chrome` searches that list
-//! directly, skipping `$PATH` entirely. `THEIR` is unchanged: a plain
-//! `$PATH` search, no fallback (this domain's real meaning is the
-//! identity-gated semantics `xact-semantic` already enforces, not binary
-//! resolution).
+//! bare (no `/`), `MY` falls back to `OUR`'s real system binary
+//! directories (the same list most Linux `sudo` configurations use as
+//! `secure_path`) — before giving up for real. An explicit
+//! `£ RUN OUR chrome` searches that list directly, skipping `$PATH`
+//! entirely. `THEIR` is unchanged: a plain `$PATH` search, no fallback
+//! (this domain's real meaning is the identity-gated semantics
+//! `xact-semantic` already enforces, not binary resolution). The
+//! directory list itself, and the "does this directory contain a match"
+//! check, live in `xact-resolve` — the same functions `xact-cli`'s
+//! autocomplete calls to list candidates, so execution and completion can
+//! never disagree about where `OUR` looks.
 //!
 //! Cancellation (spec section 12; Xact–Mesut Integration Phase 8,
 //! continued): the spawned child's pid is registered with `xact-cancel`
@@ -61,12 +64,6 @@ impl fmt::Display for ProcessError {
 
 impl std::error::Error for ProcessError {}
 
-/// The `OUR` ownership domain's search list: the standard POSIX/Linux
-/// system binary directories, not user-configurable. If a shared binary
-/// genuinely lives somewhere else, `£ RUN OUR ...` honestly won't find
-/// it, rather than silently guessing at other locations.
-pub const SYSTEM_BIN_DIRS: &[&str] = &["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"];
-
 /// Runs `command_line`, naively whitespace-split into a program and its
 /// arguments, with inherited stdio, and waits for it to exit. `domain`
 /// governs how the program is resolved (see the module docs); `budget`
@@ -76,14 +73,14 @@ pub const SYSTEM_BIN_DIRS: &[&str] = &["/usr/local/sbin", "/usr/local/bin", "/us
 /// be enforced fails the call outright, before anything runs, rather than
 /// launching unconstrained.
 pub fn run(command_line: &str, domain: OwnershipKind, budget: &ResourceBudget) -> Result<ExitStatus, ProcessError> {
-    run_with_dirs(command_line, domain, budget, SYSTEM_BIN_DIRS)
+    run_with_dirs(command_line, domain, budget, &xact_resolve::system_bin_dirs())
 }
 
 fn run_with_dirs(
     command_line: &str,
     domain: OwnershipKind,
     budget: &ResourceBudget,
-    our_dirs: &[&str],
+    our_dirs: &[PathBuf],
 ) -> Result<ExitStatus, ProcessError> {
     let mut parts = command_line.split_whitespace();
     let Some(program) = parts.next() else {
@@ -92,7 +89,7 @@ fn run_with_dirs(
     let args: Vec<&str> = parts.collect();
 
     if domain == OwnershipKind::Our {
-        return match find_in_dirs(program, our_dirs) {
+        return match xact_resolve::find_binary_in_dirs(program, our_dirs) {
             Some(resolved) => spawn_and_wait(&resolved, &args, budget).map_err(|f| f.describe(program)),
             None => Err(ProcessError(format!(
                 "'{program}' was not found in Xact's shared system binary directories."
@@ -103,7 +100,7 @@ fn run_with_dirs(
     match spawn_and_wait(Path::new(program), &args, budget) {
         Ok(status) => Ok(status),
         Err(SpawnFailure::NotFound) if domain == OwnershipKind::My && !program.contains('/') => {
-            match find_in_dirs(program, our_dirs) {
+            match xact_resolve::find_binary_in_dirs(program, our_dirs) {
                 Some(resolved) => spawn_and_wait(&resolved, &args, budget).map_err(|f| f.describe(program)),
                 None => Err(ProcessError(format!(
                     "'{program}' was not found on $PATH or in Xact's shared system binary directories."
@@ -112,10 +109,6 @@ fn run_with_dirs(
         }
         Err(failure) => Err(failure.describe(program)),
     }
-}
-
-fn find_in_dirs(program: &str, dirs: &[&str]) -> Option<PathBuf> {
-    dirs.iter().map(|dir| Path::new(dir).join(program)).find(|candidate| candidate.is_file())
 }
 
 enum SpawnFailure {
@@ -241,29 +234,23 @@ mod tests {
         xact_cancel::reset();
     }
 
-    fn write_stub(dir: &std::path::Path, name: &str) -> String {
+    fn write_stub(dir: &std::path::Path, name: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let script = dir.join(name);
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
         let mut perms = std::fs::metadata(&script).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         std::fs::set_permissions(&script, perms).unwrap();
-        dir.to_str().unwrap().to_string()
-    }
-
-    #[test]
-    fn system_bin_dirs_contains_the_real_standard_locations() {
-        assert!(SYSTEM_BIN_DIRS.contains(&"/usr/bin"));
-        assert!(SYSTEM_BIN_DIRS.contains(&"/bin"));
+        dir.to_path_buf()
     }
 
     #[test]
     fn our_domain_resolves_directly_from_the_shared_directories() {
         let dir = std::env::temp_dir().join(format!("xact-process-our-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let dir_str = write_stub(&dir, "xact-our-stub");
+        let dir_path = write_stub(&dir, "xact-our-stub");
 
-        let status = run_with_dirs("xact-our-stub", OwnershipKind::Our, &ResourceBudget::default(), &[&dir_str])
+        let status = run_with_dirs("xact-our-stub", OwnershipKind::Our, &ResourceBudget::default(), &[dir_path])
             .expect("the stub should launch from the OUR directory");
         assert!(status.success());
 
@@ -283,13 +270,13 @@ mod tests {
     fn my_falls_back_to_our_directories_when_not_on_path() {
         let dir = std::env::temp_dir().join(format!("xact-process-fallback-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let dir_str = write_stub(&dir, "xact-fallback-stub");
+        let dir_path = write_stub(&dir, "xact-fallback-stub");
 
         // Not a real $PATH-findable name, so the primary attempt must
         // fail with NotFound and MY must fall back to the given OUR
         // directory to find it.
         let status =
-            run_with_dirs("xact-fallback-stub", OwnershipKind::My, &ResourceBudget::default(), &[&dir_str])
+            run_with_dirs("xact-fallback-stub", OwnershipKind::My, &ResourceBudget::default(), &[dir_path])
                 .expect("MY should fall back to the OUR directory and find the stub");
         assert!(status.success());
 
@@ -300,10 +287,10 @@ mod tests {
     fn their_does_not_fall_back_to_our_directories() {
         let dir = std::env::temp_dir().join(format!("xact-process-their-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let dir_str = write_stub(&dir, "xact-their-stub");
+        let dir_path = write_stub(&dir, "xact-their-stub");
 
         let result =
-            run_with_dirs("xact-their-stub", OwnershipKind::Their, &ResourceBudget::default(), &[&dir_str]);
+            run_with_dirs("xact-their-stub", OwnershipKind::Their, &ResourceBudget::default(), &[dir_path]);
         assert!(result.is_err(), "THEIR should behave like a plain $PATH search, with no OUR fallback");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -314,9 +301,12 @@ mod tests {
         // Contains '/', so PATH-search semantics (and therefore the MY ->
         // OUR fallback) never apply — a missing file at that exact
         // relative path is a real, honest failure, not a search miss.
-        let result = run_with_dirs("./definitely/not/a/real/path", OwnershipKind::My, &ResourceBudget::default(), &[
-            "/usr/bin",
-        ]);
+        let result = run_with_dirs(
+            "./definitely/not/a/real/path",
+            OwnershipKind::My,
+            &ResourceBudget::default(),
+            &[PathBuf::from("/usr/bin")],
+        );
         assert!(result.is_err());
     }
 }
