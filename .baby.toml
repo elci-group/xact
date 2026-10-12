@@ -1,0 +1,5 @@
+schema = "baby.install/v1"
+build_system = "cargo"
+binary = "xact"
+artifact = "target/release/xact"
+commands = [["cargo", "build", "--release", "--bin", "xact"]]

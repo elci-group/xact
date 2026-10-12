@@ -1,49 +1,101 @@
-//! Real adapter for `@ TELL` over `ollama`, a local LLM runtime installed
-//! on this machine (spec section 9; Xact–Mesut Integration Phase 7 —
-//! "Agent operations SHALL also pass through the execution architecture").
+//! Real adapter for `@ TELL` (spec section 9; Xact–Mesut Integration
+//! Phase 7 — "Agent operations SHALL also pass through the execution
+//! architecture"). Started as `ollama`-only; now dispatches across
+//! several real backends, but keeps the same boundary that always
+//! applied to `ollama` (spec section 29, "No Semantic Leakage"):
+//! provider/harness specifics stay entirely inside this crate — nothing
+//! above it (not `xact-planner`, not `xact-mesut`, not `xact-cli`) knows
+//! `ollama`, OpenAI, Anthropic, or `claude` exist; they only know "TELL
+//! has a real execution path."
 //!
-//! Xact does not implement an LLM itself. `TELL '<model>'` names a model
-//! tag verbatim, passed straight through to `ollama run <model>` — the
-//! same "compose, don't reimplement" boundary `CREATE` draws with `bank`
-//! (spec sections 3/12/13). Provider specifics stay entirely inside this
-//! crate (spec section 29, "No Semantic Leakage"): nothing above this
-//! layer — not `xact-planner`, not `xact-mesut`, not `xact-cli` — knows
-//! `ollama` exists; they only know "TELL has a real execution path."
+//! [`dispatch`] tries each backend in this fixed order, matching how
+//! specific each one's namespace is:
+//! 1. [`harness`] — a small, hand-verified registry of real CLI coding
+//!    agents whose non-interactive mode behaves like a stateless "answer
+//!    this" call (`claude -p`, `kimi -p`, `gemini -p`, `cursor-agent -p`
+//!    without `--force`) — deliberately excludes autonomous
+//!    coding-agent invocations (`codex exec`, Meta's `muse exec`, `kilo
+//!    run --auto`, `aider --message ... --yes-always`) that can edit
+//!    files or run shell commands as a side effect; see `harness`'s own
+//!    doc comment. Checked first since a harness binary name could never
+//!    collide with a real model tag.
+//! 2. Every API-key-provisioned provider — [`openai`], [`anthropic`],
+//!    [`groq`], [`xai`], [`openrouter`], [`moonshot`] (Kimi's API, not
+//!    to be confused with the `kimi` *harness* above — same underlying
+//!    company, two different real integrations), [`zhipu`] (z.ai/GLM) —
+//!    each active only when its own API key env var is set, and only
+//!    for a name that's actually in that key's live model list.
+//! 4. [`ollama`] — the original default: anything not resolved above is
+//!    assumed to be a local Ollama model tag, and fails fast (not a raw
+//!    `ollama` pull-manifest error) if it isn't actually installed.
+//!
+//! Not yet integrated: HuggingFace. Researched and deliberately left out
+//! — HuggingFace has no per-token "models available to me" endpoint
+//! matching every other provider's `{"data":[{"id":...}]}` shape; its
+//! Hub catalog API lists its entire public catalog (hundreds of
+//! thousands of repos) rather than an account-scoped list. Forcing it
+//! into this module's existing pattern would mean either querying that
+//! whole catalog (wrong scope) or hardcoding a curated shortlist blind
+//! to what the user's own token can actually reach — a real product
+//! decision, not a research gap this crate should quietly guess at.
+//!
+//! [`catalog::known_targets`] (re-exported as [`known_targets`])
+//! aggregates real names from every backend above for live completion —
+//! `xact-completion-graph` calls it while `@ TELL`'s target is being
+//! typed. It's advisory only: `dispatch` re-resolves independently at
+//! execution time and never trusts the completion list as authorization
+//! to run something.
 //!
 //! `READING` a directory is aggregated through the real `bound` tool
 //! first (spec section 4: "Xact shall therefore not reimplement
 //! source-bundling semantics inside... `TELL` merely for convenience...
 //! Xact shall construct and execute an appropriate `bound` operation"),
 //! not walked by hand; `READING` a file is read directly. `POPULATING`,
-//! if given, gets the model's response written to it via `bank`
-//! (establishing the path first, exactly as `£ CREATE` would) then
-//! `std::fs::write`; with no `POPULATING`, the response is only returned.
+//! if given, gets the response written to it via `bank` (establishing
+//! the path first, exactly as `£ CREATE` would) then `std::fs::write`;
+//! with no `POPULATING`, the response is only returned. Every backend
+//! shares the exact same prompt text (persona/context/think folded into
+//! one string by [`build_prompt`]) — no per-provider prompt-formatting
+//! differences yet.
 //!
-//! `budget` (spec section 22) is applied to the `ollama` process the same
-//! way `xact-process`/`xact-bound` apply it — directive section 14 lists
+//! `budget` (spec section 22) is applied the same way
+//! `xact-process`/`xact-bound` apply it, for backends that spawn a real
+//! local process (`ollama`, a harness): directive section 14 lists
 //! "resource constraints" as one of the lifecycle semantics agent
-//! execution must receive, same as any other workload.
+//! execution must receive. A pure-API backend (every provider module
+//! except `ollama`) has no local process to cgroup-constrain, so a
+//! stated budget against one of those fails fast rather than being
+//! silently ignored — the same "SHALL fail before the workload begins"
+//! rule `ResourceBudget`'s own `unenforceable` list already enforces
+//! elsewhere.
 //!
-//! `THINK`'s numeric budget has no numeric equivalent in `ollama` — its
-//! real `--think` flag only accepts `true`/`false`/`low`/`medium`/`high`.
-//! Rather than inventing a fabricated number-to-level mapping, any
-//! `THINK` value enables the real thinking-mode flag (`--think true`) and
-//! the stated number is folded into the prompt text itself as a plain
-//! instruction, letting the model interpret it in its own words.
-//!
-//! Cancellation mid-generation is real (Xact–Mesut Integration Phase 8,
-//! continued): the spawned `ollama` process is registered with
-//! `xact-cancel` between `spawn` and `wait_with_output`, so a real
-//! `CTRL-C` can stop generation the same way it stops `£ RUN`/`£ BOUND`.
-//! `ollama`'s own real thinking-mode/streaming behavior is otherwise used
-//! as-is, uninterpreted.
+//! Cancellation mid-generation is real for subprocess backends (Xact–
+//! Mesut Integration Phase 8, continued): the spawned process is
+//! registered with `xact-cancel` between `spawn` and `wait_with_output`,
+//! so a real `CTRL-C` can stop generation the same way it stops `£ RUN`/
+//! `£ BOUND`. An in-flight HTTP call to any provider is not abortable
+//! this way yet — a bounded request timeout is the only ceiling on those
+//! for now (documented limitation, not silently dropped).
+
+mod anthropic;
+mod catalog;
+mod groq;
+mod harness;
+mod moonshot;
+mod ollama;
+mod openai;
+mod openai_compatible;
+mod openrouter;
+mod xai;
+mod zhipu;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use xact_ast::ResourceBudget;
+
+pub use catalog::{known_targets, selectable_models};
 
 #[derive(Debug)]
 pub struct TellError(String);
@@ -69,9 +121,10 @@ pub struct TellRequest {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Runs `request` through the real `ollama` binary, constrained by
-/// `budget`, writing the response to `populating` if given (via `bank`,
-/// same as `£ CREATE`) in addition to returning it.
+/// Runs `request` through whichever real backend [`dispatch`] resolves
+/// its `model` field to, constrained by `budget` where that backend has
+/// a real process to constrain, writing the response to `populating` if
+/// given (via `bank`, same as `£ CREATE`) in addition to returning it.
 pub fn tell(request: &TellRequest, populating: Option<&Path>, budget: &ResourceBudget) -> Result<String, TellError> {
     let context = match &request.reading {
         Some(path) if path.is_dir() => Some(aggregate_directory(path)?),
@@ -84,29 +137,7 @@ pub fn tell(request: &TellRequest, populating: Option<&Path>, budget: &ResourceB
 
     let prompt = build_prompt(request.persona.as_deref(), context.as_deref(), &request.instruction, request.think);
 
-    let mut command = Command::new("ollama");
-    command.arg("run").arg(&request.model).arg(&prompt);
-    if request.think.is_some() {
-        command.arg("--think").arg("true");
-    }
-
-    let _resource_guard = xact_resource::apply(&mut command, budget)
-        .map_err(|err| TellError(format!("cannot honour the active resource policy: {err}")))?;
-
-    command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let child = command.spawn().map_err(|err| TellError(format!("failed to run ollama: {err}")))?;
-    let _cancel_guard = xact_cancel::register(child.id());
-    let output = child
-        .wait_with_output()
-        .map_err(|err| TellError(format!("failed to wait for ollama: {err}")))?;
-    if !output.status.success() {
-        return Err(TellError(format!(
-            "ollama exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let response = dispatch(&request.model, &prompt, request.think.is_some(), budget)?;
 
     if let Some(destination) = populating {
         xact_bank::establish(destination)
@@ -116,6 +147,58 @@ pub fn tell(request: &TellRequest, populating: Option<&Path>, budget: &ResourceB
     }
 
     Ok(response)
+}
+
+/// Every pure-API provider this build knows, as `(display name, its
+/// cached model list, its real `run`)` — one entry per provider module,
+/// so adding a provider means adding a row here, not another copy of
+/// the same three-line check. All share one function-pointer shape,
+/// which every listed `models`/`run` already matches exactly (plain top-
+/// level `fn`s, no captures), so this is a plain `const` table, not
+/// something built at runtime.
+type ModelsFn = fn() -> Vec<String>;
+type RunFn = fn(&str, &str) -> Result<String, TellError>;
+const API_PROVIDERS: &[(&str, ModelsFn, RunFn)] = &[
+    ("OpenAI", catalog::openai_models, openai::run),
+    ("Anthropic", catalog::anthropic_models, anthropic::run),
+    ("Groq", catalog::groq_models, groq::run),
+    ("xAI", catalog::xai_models, xai::run),
+    ("OpenRouter", catalog::openrouter_models, openrouter::run),
+    ("Moonshot (Kimi)", catalog::moonshot_models, moonshot::run),
+    ("Zhipu (z.ai)", catalog::zhipu_models, zhipu::run),
+];
+
+/// Resolves `model` to a real backend and runs `prompt` through it — see
+/// this module's doc comment for the fixed try-order and why it's
+/// ordered that way. Falls all the way through to [`ollama::run`] (which
+/// does its own real "is this actually installed" check) when nothing
+/// more specific claims the name.
+fn dispatch(model: &str, prompt: &str, think: bool, budget: &ResourceBudget) -> Result<String, TellError> {
+    if let Some(flag) = harness::resolve(model) {
+        return harness::run(model, flag, prompt, budget);
+    }
+    for (name, models, run) in API_PROVIDERS {
+        if models().iter().any(|candidate| candidate == model) {
+            require_no_resource_budget(budget, name)?;
+            return run(model, prompt);
+        }
+    }
+    ollama::run(model, prompt, think, budget)
+}
+
+/// A pure-API backend has no local process for `xact_resource::apply` to
+/// constrain — rather than silently running unconstrained while a
+/// `SPEND`/`SAVE` policy is active, fail the same way an already-
+/// unenforceable resource does elsewhere (spec section 10: "execution
+/// SHALL fail before the workload begins").
+fn require_no_resource_budget(budget: &ResourceBudget, backend: &str) -> Result<(), TellError> {
+    if budget.is_empty() {
+        Ok(())
+    } else {
+        Err(TellError(format!(
+            "cannot honour the active resource policy: {backend} is a remote API with no local process to constrain"
+        )))
+    }
 }
 
 fn aggregate_directory(path: &Path) -> Result<String, TellError> {
@@ -199,6 +282,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&out).unwrap(), response, "POPULATING should hold the same response");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model that plain doesn't exist anywhere (not a harness, not a
+    /// live provider model, not an installed Ollama tag) must fail fast,
+    /// with a message naming the problem — not minutes later with
+    /// `ollama`'s own raw pull-manifest error. Real (talks to the
+    /// actually-installed `ollama list` on this machine), but fast: no
+    /// model load or generation ever starts.
+    #[test]
+    fn unknown_model_fails_fast_with_a_clear_message() {
+        let request = TellRequest {
+            model: "definitely-not-a-real-model-xact-test".into(),
+            persona: None,
+            reading: None,
+            instruction: "hi".into(),
+            think: None,
+        };
+        let result = tell(&request, None, &ResourceBudget::default());
+        let err = result.expect_err("an uninstalled model must be rejected, not passed to ollama run");
+        assert!(err.to_string().contains("definitely-not-a-real-model-xact-test"), "{err}");
     }
 
     #[test]

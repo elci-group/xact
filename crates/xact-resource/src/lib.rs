@@ -272,7 +272,16 @@ mod tests {
             .expect("memory.max should be a plain byte count");
 
         let total = total_ram_bytes().unwrap();
-        assert_eq!(memory_max, total / 2);
+        // `/proc/meminfo` can change by one memory page between `apply`
+        // taking its snapshot and this assertion taking another (notably
+        // under memory hotplug/ballooning). The kernel-written cgroup value
+        // must therefore be the requested half within one page, rather than
+        // requiring two independently sampled volatile values to be bitwise
+        // identical.
+        assert!(
+            memory_max.abs_diff(total / 2) <= 4096,
+            "memory.max {memory_max} was not approximately half of sampled total RAM {total}"
+        );
 
         let mut child = command.spawn().expect("true should launch");
         child.wait().expect("true should exit");

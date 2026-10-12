@@ -6,5 +6,7 @@ license.workspace = true
 
 [dependencies]
 xact-ast = { workspace = true }
+xact-lexer = { workspace = true }
 xact-parser = { workspace = true }
 xact-resolve = { workspace = true }
+xact-tell = { workspace = true }

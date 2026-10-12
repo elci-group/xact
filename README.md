@@ -18,7 +18,10 @@ Xact understands three kinds of input, each parsed by a single deterministic
 grammar (no LLM involved in parsing, ownership resolution, or policy evaluation):
 
 - **`£` imperative commands** — `£ CREATE MY ~/project/`, `£ SEE MY ~/project/README.md`,
-  `£ RUN 'cargo build'`, `£ BOUND MY ~/project/ to MY ~/bundle.txt`. Ownership
+  `£ COPY MY ~/draft.md to MY ~/backup.md`, `£ MOVE MY ~/draft.md to MY ~/archive.md`,
+  `£ RUN 'cargo build'`, `£ BOUND MY ~/project/ to MY ~/bundle.txt`. COPY handles ordinary
+  files/directories recursively and never overwrites; MOVE is atomic and refuses cross-filesystem
+  fallbacks. Ownership
   (`MY`/`OUR`/`THEIR`) and references (`THIS`/`THAT`) are resolved before anything
   runs, and a command can depend on the outcome of a previous one:
   `£ RUN 'test' WHEN THAT SUCCEEDS`.
@@ -26,15 +29,17 @@ grammar (no LLM involved in parsing, ownership resolution, or policy evaluation)
   soft preferences (`PREFER`/`DODGE`), and scheduling (`CONCURRENTLY`/
   `CONSECUTIVELY`), accumulated for the session and enforced for real.
 - **`@` agent blocks** — `@ TELL '<model>' BE "..." READING MY ~/project/
-  POPULATING MY ~/review.txt THINK 80 "..."` runs a real local model via
-  `ollama`, with `READING` a directory aggregated through `bound` first.
+  POPULATING MY ~/review.txt THINK 80 "..."` runs one real model. `@ TEAM
+  '<model-a>, <model-b>' ...` runs an explicit roster concurrently and returns
+  one labelled report. `READING` a directory is aggregated through `bound`
+  first; `POPULATING` writes the single final response/report.
 
 Every accepted command is planned, then actually executed — `£ CREATE` really
 creates the file or directory via `bank`, `£ SEE` really renders it via `gls` or
 `bat`, `£ RUN` really spawns and waits on the process, `£ BOUND` really
-aggregates the source set via `bound`, and `@ TELL` really calls the configured
-model. Nothing is simulated: a plan that can't be honestly executed is reported
-as unsupported rather than faked.
+aggregates the source set via `bound`, and `@ TELL`/`@ TEAM` really call their
+configured model or roster. Nothing is simulated: a plan that can't be honestly
+executed is reported as unsupported rather than faked.
 
 ## Execution architecture
 
@@ -43,7 +48,7 @@ policy evaluation, and capability validation. Real execution is delegated to
 [Mesut](https://github.com/elci-group/mesut), a general-purpose execution
 orchestration runtime, and to the real ELCi tools themselves. Concretely:
 
-- `£ RUN`/`£ BOUND`/`@ TELL` submit real work to a shared Mesut runtime, which
+- `£ RUN`/`£ BOUND`/`@ TELL`/`@ TEAM` submit real work to a shared Mesut runtime, which
   schedules it across Tokio, Rayon, or a dedicated blocking thread pool.
 - `! SPEND`/`! SAVE` resource policy is enforced with real Linux cgroup v2
   controls, not just displayed.
@@ -66,7 +71,7 @@ and recovery constructs beyond a plain `WHEN ... FAILS` fallback).
 Xact is a Cargo workspace of small, single-purpose crates. The language pipeline
 (lexer → parser → AST → semantic validation → policy → planner) is fully
 deterministic and covered by unit tests; execution adapters
-(`xact-bank`, `xact-see`, `xact-bound`, `xact-process`, `xact-tell`) each wrap
+(`xact-bank`, `xact-see`, `xact-bound`, `xact-process`, `xact-tell`, `xact-team`) each wrap
 exactly one real external tool; `xact-mesut` is the single boundary crate that
 talks to Mesut; `xact-cli` is the interactive REPL that ties it all together.
 
@@ -78,7 +83,7 @@ cargo test --workspace
 cargo run --bin xact
 ```
 
-Real `£ CREATE`/`£ SEE`/`£ BOUND`/`@ TELL` execution requires `bank`, `gls`,
+Real `£ CREATE`/`£ SEE`/`£ BOUND`/`@ TELL`/`@ TEAM` execution requires `bank`, `gls`,
 `bat`, `bound`, and `ollama` (with at least one model pulled) to be installed
 and reachable on `$PATH`.
 

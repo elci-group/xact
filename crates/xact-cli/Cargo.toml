@@ -11,9 +11,12 @@ path = "src/main.rs"
 [dependencies]
 xact-ast = { workspace = true }
 xact-core = { workspace = true }
+xact-completion-graph = { workspace = true }
+xact-parser = { workspace = true }
 xact-planner = { workspace = true }
 xact-executor = { workspace = true }
 xact-mesut = { workspace = true }
 xact-cancel = { workspace = true }
 ctrlc = "3"
 reedline = "0.38"
+nu-ansi-term = "0.50"

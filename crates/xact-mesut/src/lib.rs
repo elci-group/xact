@@ -482,6 +482,41 @@ pub fn tell_async(
     })
 }
 
+/// Runs a `@ TEAM` roster through the same Mesut execution seam as every
+/// other Xact workload. `xact-team` owns fan-out/fan-in; Mesut owns the
+/// lifetime, scheduling, telemetry, and outer concurrent-branch handling.
+pub fn team(
+    request: xact_team::TeamRequest,
+    budget: xact_ast::ResourceBudget,
+) -> Result<xact_team::TeamResult, AdapterError> {
+    team_async(request, budget)?.join()
+}
+
+/// Same as [`team`], but admits the complete team as an independent Mesut
+/// branch for `! CONCURRENTLY`.
+pub fn team_async(
+    request: xact_team::TeamRequest,
+    budget: xact_ast::ResourceBudget,
+) -> Result<PendingTask<xact_team::TeamResult>, AdapterError> {
+    submit("xact.team", move || xact_team::execute(&request, &budget).map_err(|err| err.to_string()))
+}
+
+pub fn copy_path(source: PathBuf, destination: PathBuf) -> Result<(), AdapterError> {
+    copy_path_async(source, destination)?.join()
+}
+
+pub fn copy_path_async(source: PathBuf, destination: PathBuf) -> Result<PendingTask<()>, AdapterError> {
+    submit("xact.copy", move || xact_process::copy_path(&source, &destination).map_err(|err| err.to_string()))
+}
+
+pub fn move_path(source: PathBuf, destination: PathBuf) -> Result<(), AdapterError> {
+    move_path_async(source, destination)?.join()
+}
+
+pub fn move_path_async(source: PathBuf, destination: PathBuf) -> Result<PendingTask<()>, AdapterError> {
+    submit("xact.move", move || xact_process::move_path(&source, &destination).map_err(|err| err.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

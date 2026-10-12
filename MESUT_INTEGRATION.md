@@ -22,6 +22,13 @@
 > them directly — every plan variant goes through the adapter. See `crates/xact-mesut/src/lib.rs`
 > module docs for the full detail.
 >
+> **Update — native filesystem transfer.** No ELci tool installed on this system owns generic
+> filesystem copy/move semantics (unlike `bank` for creation and `bound` for aggregation), so
+> `£ COPY` and `£ MOVE` are implemented as a narrow Rust-native adapter in `xact-process` and are
+> submitted through `xact-mesut` as `xact.copy`/`xact.move` blocking workloads. COPY handles
+> ordinary files and directory trees, never overwrites, and rejects symlinks; MOVE uses atomic
+> rename and fails across filesystem boundaries rather than fabricating a copy-and-delete fallback.
+>
 > **Phase 3 — done.** Spec section 23: `! CONCURRENTLY` "creates independent execution branches";
 > `! CONSECUTIVELY` creates an explicit dependency (`A → B`). `CONSECUTIVELY` needed no new
 > mechanism — blocking on each plan's real result before the next command is even read already is
@@ -132,11 +139,15 @@
 > through the exact same `WorkKind::Blocking` seam as every other verb, so scheduling,
 > observability (real lifecycle events), resource constraints (real cgroup enforcement via
 > `xact-resource`), concurrency, and failure propagation all apply for free — verified live and by
-> a passing test suite. Cancellation and dependencies are explicitly not implemented (Phase 8 work,
-> not Phase 7 — neither exists for *any* verb yet, not just `TELL`). `TEAM` (spec section 21:
-> "TEAM -> Xact orchestration runtime") has no execution plan yet, reported the same way any other
-> not-yet-implemented verb is — a real scope boundary, not an oversight. Full test suite green. See
-> `crates/xact-tell/src/lib.rs` module docs for the full detail.
+> a passing test suite. `TEAM` is now a real Xact orchestration capability: its target is an
+> explicit comma-separated roster (`@ TEAM 'model-a, model-b' ...`), validated to contain at least
+> two distinct members. `xact-team` fans the common, validated `BE`/`READING`/`THINK` request out
+> concurrently, joins responses in roster order into a labelled report, and uses `bank` once to
+> establish the optional `POPULATING` destination before writing that one final report. The complete
+> team is submitted as one `xact.team` Mesut workload, so it receives the same scheduling,
+> lifecycle, outer `! CONCURRENTLY`, resource-policy, and failure propagation behavior as `TELL`.
+> A member failure fails the team without fabricating or writing a partial report. See
+> `crates/xact-team/src/lib.rs` for the orchestration boundary.
 >
 > **Phase 8 — partially done: dependency graphs are real; cancellation, recovery beyond a plain
 > fallback, and multi-branch aggregation are not.** Directive: "Introduce dependency graphs,

@@ -1023,3 +1023,7 @@ That gives the ecosystem a powerful division of responsibility:
 ```
 
 Xact consequently becomes not merely a shell, but the **semantic command surface through which the ELci tool ecosystem becomes composable**.
+
+## TempCheq
+
+- Submit every artifact containing LLM inference calls to tempcheq before delivery: run `tempcheq <path>` on the workspace that produced the artifact, review the temperature audit, and include the findings with the artifact (`tempcheq --report` for JSON output, `tempcheq report <path>` for Markdown/HTML report files).

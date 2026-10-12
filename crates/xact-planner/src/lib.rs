@@ -54,6 +54,8 @@ pub enum ExecutionPlan {
     /// is `bound`'s own `--out` file; `None` means `bound`'s clipboard
     /// default applies.
     Bound { source: PathBuf, destination: Option<PathBuf> },
+    Copy { source: PathBuf, destination: PathBuf },
+    Move { source: PathBuf, destination: PathBuf },
     /// `@ TELL` -> a real local agent provider (spec section 9;
     /// Xact–Mesut Integration Phase 7). `reading`/`populating` are already
     /// resolved to real paths; `model` is the target string verbatim
@@ -61,6 +63,17 @@ pub enum ExecutionPlan {
     /// adapter does, by trying to run it).
     Agent {
         model: String,
+        persona: Option<String>,
+        reading: Option<PathBuf>,
+        populating: Option<PathBuf>,
+        think: Option<u32>,
+        instruction: String,
+    },
+    /// `@ TEAM` -> Xact's team orchestration runtime. The comma-separated
+    /// roster is validated by `xact-team`; provider-specific resolution is
+    /// still delegated to `xact-tell` for each member.
+    Team {
+        roster: String,
         persona: Option<String>,
         reading: Option<PathBuf>,
         populating: Option<PathBuf>,
@@ -141,19 +154,32 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             PlanOutcome::Plan(ExecutionPlan::Bound { source: resolve_my_default_path(&raw_source, operand), destination })
         }
+        xact_ast::Verb::Copy | xact_ast::Verb::Move => {
+            let Some(source) = cmd.operand.as_ref().and_then(|operand| resolve_path(operand, references)) else {
+                return PlanOutcome::Unsupported(format!("{} requires a source.", cmd.verb.as_str()));
+            };
+            let Some(destination_operand) = &cmd.destination else {
+                return PlanOutcome::Unsupported(format!("{} requires a destination introduced by 'to'.", cmd.verb.as_str()));
+            };
+            let Some(destination) = resolve_path(destination_operand, references) else {
+                return PlanOutcome::Unsupported(format!("{}'s destination did not resolve to a path.", cmd.verb.as_str()));
+            };
+            let source = resolve_my_default_path(&source, cmd.operand.as_ref().unwrap());
+            let destination = resolve_my_default_path(&destination, destination_operand);
+            match cmd.verb {
+                xact_ast::Verb::Copy => PlanOutcome::Plan(ExecutionPlan::Copy { source, destination }),
+                xact_ast::Verb::Move => PlanOutcome::Plan(ExecutionPlan::Move { source, destination }),
+                _ => unreachable!(),
+            }
+        }
         other => PlanOutcome::Unsupported(format!("{} has no execution plan yet.", other.as_str())),
     }
 }
 
 /// `AgentBlock -> ExecutionPlan` (spec section 9; Xact–Mesut Integration
-/// Phase 7). Only `TELL` has a plan — `TEAM` (spec section 21: "TEAM ->
-/// Xact orchestration runtime") is reported unsupported, same as any
-/// other not-yet-implemented verb, rather than guessed at.
+/// Phase 7). `TELL` dispatches one provider; `TEAM` delegates roster
+/// orchestration to `xact-team` while retaining the same validated clauses.
 pub fn plan_agent(block: &AgentBlock, references: &ReferenceContext) -> PlanOutcome {
-    if block.verb != AgentVerb::Tell {
-        return PlanOutcome::Unsupported(format!("{} has no execution plan yet.", block.verb.as_str()));
-    }
-
     let persona = match block.clause(AgentClauseKind::Be) {
         Some(AgentClause::Be { persona, .. }) => Some(persona.clone()),
         _ => None,
@@ -178,14 +204,24 @@ pub fn plan_agent(block: &AgentBlock, references: &ReferenceContext) -> PlanOutc
         _ => None,
     };
 
-    PlanOutcome::Plan(ExecutionPlan::Agent {
-        model: block.target.clone(),
-        persona,
-        reading,
-        populating,
-        think,
-        instruction: block.instruction.clone(),
-    })
+    match block.verb {
+        AgentVerb::Tell => PlanOutcome::Plan(ExecutionPlan::Agent {
+            model: block.target.clone(),
+            persona,
+            reading,
+            populating,
+            think,
+            instruction: block.instruction.clone(),
+        }),
+        AgentVerb::Team => PlanOutcome::Plan(ExecutionPlan::Team {
+            roster: block.target.clone(),
+            persona,
+            reading,
+            populating,
+            think,
+            instruction: block.instruction.clone(),
+        }),
+    }
 }
 
 fn resolve_path(operand: &Operand, references: &ReferenceContext) -> Option<String> {
@@ -635,13 +671,17 @@ mod tests {
     }
 
     #[test]
-    fn team_has_no_execution_plan_yet() {
+    fn team_resolves_to_a_team_plan() {
         let references = ReferenceContext::new();
         let mut block = agent_block(vec![]);
         block.verb = AgentVerb::Team;
+        block.target = "gemma3, second-agent".into();
         match plan_agent(&block, &references) {
-            PlanOutcome::Unsupported(reason) => assert!(reason.contains("TEAM")),
-            other => panic!("expected unsupported, got {other:?}"),
+            PlanOutcome::Plan(ExecutionPlan::Team { roster, instruction, .. }) => {
+                assert_eq!(roster, "gemma3, second-agent");
+                assert_eq!(instruction, "Review this project.");
+            }
+            other => panic!("expected team plan, got {other:?}"),
         }
     }
 }

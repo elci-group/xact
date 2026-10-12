@@ -80,19 +80,28 @@ impl Session {
 
     /// Deterministic valid-next-token suggestions for the given draft
     /// input (spec section 15), filtered for policy operators already
-    /// singleton-established in this session (spec section 16). Static
-    /// grammar suggestions (keywords, operators, placeholders) always take
-    /// priority; real-world dynamic candidates — installed binaries after
-    /// `RUN`, real filesystem entries after an ownership keyword — only
-    /// ever apply once the static list has nothing left to say (see
-    /// `xact-completion-graph`'s module doc for why that's the correct
-    /// boundary between the two).
+    /// singleton-established in this session (spec section 16). Tries
+    /// real-world dynamic candidates first — installed binaries after
+    /// `RUN`, real filesystem entries after an ownership keyword, real
+    /// model/harness names while `@ TELL`'s target is being typed — and
+    /// falls back to the static grammar list (keywords, operators,
+    /// placeholders) only once dynamic has nothing to say. Safe to order
+    /// this way for every case that predates `@ TELL`'s target
+    /// completion: `xact_completion_graph::dynamic_complete` only ever
+    /// returns non-empty once `xact_completion::complete` would already
+    /// return empty (see that crate's module doc — the two are
+    /// complementary, not overlapping) — except for `@ TELL`'s target
+    /// itself, where the static list is *wrong* the instant any word
+    /// follows `TELL` (it already treats the target as consumed and
+    /// jumps to suggesting clause keywords), which is exactly why this
+    /// order had to change: static no longer gets a chance to shadow the
+    /// real target list there.
     pub fn complete(&self, input: &str) -> Vec<String> {
-        let static_suggestions = self.policy.filter_suggestions(xact_completion::complete(input));
-        if !static_suggestions.is_empty() {
-            return static_suggestions;
+        let dynamic_suggestions = xact_completion_graph::dynamic_complete(input);
+        if !dynamic_suggestions.is_empty() {
+            return dynamic_suggestions;
         }
-        xact_completion_graph::dynamic_complete(input)
+        self.policy.filter_suggestions(xact_completion::complete(input))
     }
 
     /// This session's resolved-reference state, for a caller that wants to

@@ -10,3 +10,5 @@ xact-bank = { workspace = true }
 xact-bound = { workspace = true }
 xact-resource = { workspace = true }
 xact-cancel = { workspace = true }
+ureq = "2"
+serde_json = "1"

@@ -33,33 +33,55 @@ use xact_parser::{parse_line, ParseOutcome};
 /// end. Returns an empty list once the input is already a complete,
 /// executable command — there is nothing left to suggest.
 pub fn complete(input: &str) -> Vec<String> {
-    let Some(suggestions) = expected_after(input) else {
+    let Some(outcome) = classify(input) else {
         return Vec::new();
     };
 
     let Some(partial) = trailing_partial_word(input) else {
-        return suggestions;
+        return outcome.expected;
     };
 
     // Re-parse with the partial word removed. An unchanged candidate list
-    // means the parser never consumed it — it's genuinely partial, so
-    // narrow by it. A changed (or now-complete) list means the parser
-    // already consumed it as a real token; `suggestions` already
-    // describes what comes next, not a filter target.
+    // means the parser never consumed it — it's genuinely partial (e.g.
+    // "£ C" is `Invalid` as a whole — "C" isn't a verb — but stripping it
+    // back to "£ " leaves the exact same candidate list, so "C" is really
+    // still-being-typed and worth narrowing by, `Invalid` or not). A
+    // changed (or now-complete) list means the parser really did consume
+    // it as a real token and reject it outright — there's nothing valid
+    // to suggest appending or replacing it with, so an `Invalid` outcome
+    // here returns nothing rather than falling back to `expected` itself:
+    // that list exists for the diagnostic printed on rejection, not as a
+    // menu of "acceptable replacements" (accepting one would just be
+    // typed after the very thing that made this invalid), and offering
+    // more than one of `£`/`!`/`@` together in that menu has previously
+    // crashed `reedline`'s `IdeMenu` outright — their UTF-8 lengths
+    // differ (`£` is two bytes, `!`/`@` one). An `Incomplete` outcome has
+    // no such issue: `expected` there really is "what validly comes
+    // next", so it's returned as-is.
     let stripped = &input[..input.len() - partial.len()];
-    if expected_after(stripped).as_deref() == Some(suggestions.as_slice()) {
-        filter_by_prefix(suggestions, partial)
+    if classify(stripped).map(|o| o.expected).as_deref() == Some(outcome.expected.as_slice()) {
+        filter_by_prefix(outcome.expected, partial)
+    } else if outcome.unrecoverable {
+        Vec::new()
     } else {
-        suggestions
+        outcome.expected
     }
 }
 
-/// The parser's own next-token candidates for `input`, or `None` if
-/// `input` already parses as a complete command.
-fn expected_after(input: &str) -> Option<Vec<String>> {
+/// The parser's own next-token candidates for `input`, alongside whether
+/// getting them required an [`ParseOutcome::Invalid`] outcome — or `None`
+/// if `input` already parses as a complete command, which leaves nothing
+/// to suggest.
+struct Classified {
+    expected: Vec<String>,
+    unrecoverable: bool,
+}
+
+fn classify(input: &str) -> Option<Classified> {
     match parse_line(input) {
         ParseOutcome::Complete(_) => None,
-        ParseOutcome::Incomplete(diag) | ParseOutcome::Invalid(diag) => Some(diag.expected),
+        ParseOutcome::Incomplete(diag) => Some(Classified { expected: diag.expected, unrecoverable: false }),
+        ParseOutcome::Invalid(diag) => Some(Classified { expected: diag.expected, unrecoverable: true }),
     }
 }
 
@@ -232,5 +254,20 @@ mod tests {
     #[test]
     fn unmatched_prefix_narrows_to_nothing() {
         assert!(complete("£ Z").is_empty());
+    }
+
+    #[test]
+    fn a_line_not_starting_with_pound_bang_or_at_suggests_nothing() {
+        // "£"/"!"/"@" all being genuinely valid ways to start a line means
+        // the parser's own `Invalid` diagnostic for e.g. "hello" names all
+        // three as `expected` — but offering that combination back as
+        // *completions* would suggest overwriting/appending onto already-
+        // wrong input rather than fixing it, and mixing `£` (2 UTF-8 bytes)
+        // with `!`/`@` (1 byte each) in one suggestion list has crashed
+        // `reedline`'s `IdeMenu` outright. A live editor should highlight
+        // this text as wrong instead (see `xact-cli`'s `XactHighlighter`),
+        // not offer it as something to complete.
+        assert!(complete("hello").is_empty());
+        assert!(complete("h").is_empty());
     }
 }

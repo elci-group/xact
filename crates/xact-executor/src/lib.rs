@@ -79,10 +79,15 @@ pub enum ExecutionOutcome {
     /// A source set was aggregated via `bound` — `destination` names
     /// where, or `None` for `bound`'s own clipboard default.
     Bounded { source: PathBuf, destination: Option<PathBuf> },
+    Copied { source: PathBuf, destination: PathBuf },
+    Moved { source: PathBuf, destination: PathBuf },
     /// A `@ TELL` block ran against a real agent provider. `populated`
     /// names where the response was also written, if `POPULATING` was
     /// stated.
     Told { model: String, response: String, populated: Option<PathBuf> },
+    /// A `@ TEAM` roster completed. `report` contains one labelled response
+    /// per member in the order the user stated in the roster.
+    Teamed { members: Vec<String>, report: String, populated: Option<PathBuf> },
     Failed { message: String },
 }
 
@@ -101,9 +106,20 @@ pub fn execute(plan: ExecutionPlan, budget: ResourceBudget) -> ExecutionOutcome 
             destination.clone(),
             xact_mesut::bound_aggregate(source, destination, budget),
         ),
+        ExecutionPlan::Copy { source, destination } => transfer_outcome(source.clone(), destination.clone(), false, xact_mesut::copy_path(source, destination)),
+        ExecutionPlan::Move { source, destination } => transfer_outcome(source.clone(), destination.clone(), true, xact_mesut::move_path(source, destination)),
         ExecutionPlan::Agent { model, persona, reading, populating, think, instruction } => {
             let request = xact_tell::TellRequest { model: model.clone(), persona, reading, instruction, think };
             told_outcome(model, populating.clone(), xact_mesut::tell(request, populating, budget))
+        }
+        ExecutionPlan::Team { roster, persona, reading, populating, think, instruction } => {
+            let request = match xact_team::TeamRequest::from_roster(
+                &roster, persona, reading, populating, instruction, think,
+            ) {
+                Ok(request) => request,
+                Err(err) => return ExecutionOutcome::Failed { message: err.to_string() },
+            };
+            team_outcome(xact_mesut::team(request, budget))
         }
     }
 }
@@ -138,10 +154,23 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
                 .map(|task| Pending(PendingKind::Bound { source, destination, task }))
                 .map_err(submission_failed)
         }
+        ExecutionPlan::Copy { source, destination } => xact_mesut::copy_path_async(source.clone(), destination.clone(), )
+            .map(|task| Pending(PendingKind::Copy { source, destination, task })).map_err(submission_failed),
+        ExecutionPlan::Move { source, destination } => xact_mesut::move_path_async(source.clone(), destination.clone())
+            .map(|task| Pending(PendingKind::Move { source, destination, task })).map_err(submission_failed),
         ExecutionPlan::Agent { model, persona, reading, populating, think, instruction } => {
             let request = xact_tell::TellRequest { model: model.clone(), persona, reading, instruction, think };
             xact_mesut::tell_async(request, populating.clone(), budget)
                 .map(|task| Pending(PendingKind::Agent { model, populated: populating, task }))
+                .map_err(submission_failed)
+        }
+        ExecutionPlan::Team { roster, persona, reading, populating, think, instruction } => {
+            let request = xact_team::TeamRequest::from_roster(
+                &roster, persona, reading, populating, instruction, think,
+            )
+            .map_err(|err| ExecutionOutcome::Failed { message: err.to_string() })?;
+            xact_mesut::team_async(request, budget)
+                .map(|task| Pending(PendingKind::Team { task }))
                 .map_err(submission_failed)
         }
     }
@@ -168,10 +197,15 @@ enum PendingKind {
         destination: Option<PathBuf>,
         task: xact_mesut::PendingTask<()>,
     },
+    Copy { source: PathBuf, destination: PathBuf, task: xact_mesut::PendingTask<()> },
+    Move { source: PathBuf, destination: PathBuf, task: xact_mesut::PendingTask<()> },
     Agent {
         model: String,
         populated: Option<PathBuf>,
         task: xact_mesut::PendingTask<String>,
+    },
+    Team {
+        task: xact_mesut::PendingTask<xact_team::TeamResult>,
     },
 }
 
@@ -183,7 +217,10 @@ impl Pending {
             PendingKind::View { path, tool, task } => view_outcome(path, tool, task.join()),
             PendingKind::Run { command_line, task } => run_outcome(command_line, task.join()),
             PendingKind::Bound { source, destination, task } => bound_outcome(source, destination, task.join()),
+            PendingKind::Copy { source, destination, task } => transfer_outcome(source, destination, false, task.join()),
+            PendingKind::Move { source, destination, task } => transfer_outcome(source, destination, true, task.join()),
             PendingKind::Agent { model, populated, task } => told_outcome(model, populated, task.join()),
+            PendingKind::Team { task } => team_outcome(task.join()),
         }
     }
 
@@ -200,9 +237,12 @@ impl Pending {
             PendingKind::Bound { source, destination, task } => {
                 task.try_join().map(|result| bound_outcome(source.clone(), destination.clone(), result))
             }
+            PendingKind::Copy { source, destination, task } => task.try_join().map(|result| transfer_outcome(source.clone(), destination.clone(), false, result)),
+            PendingKind::Move { source, destination, task } => task.try_join().map(|result| transfer_outcome(source.clone(), destination.clone(), true, result)),
             PendingKind::Agent { model, populated, task } => {
                 task.try_join().map(|result| told_outcome(model.clone(), populated.clone(), result))
             }
+            PendingKind::Team { task } => task.try_join().map(team_outcome),
         }
     }
 
@@ -215,7 +255,9 @@ impl Pending {
             PendingKind::View { task, .. } => task.drain_events(),
             PendingKind::Run { task, .. } => task.drain_events(),
             PendingKind::Bound { task, .. } => task.drain_events(),
+            PendingKind::Copy { task, .. } | PendingKind::Move { task, .. } => task.drain_events(),
             PendingKind::Agent { task, .. } => task.drain_events(),
+            PendingKind::Team { task } => task.drain_events(),
         }
     }
 }
@@ -238,6 +280,14 @@ fn bound_outcome(
     }
 }
 
+fn transfer_outcome(source: PathBuf, destination: PathBuf, moved: bool, result: Result<(), xact_mesut::AdapterError>) -> ExecutionOutcome {
+    match result {
+        Ok(()) if moved => ExecutionOutcome::Moved { source, destination },
+        Ok(()) => ExecutionOutcome::Copied { source, destination },
+        Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+    }
+}
+
 fn told_outcome(
     model: String,
     populated: Option<PathBuf>,
@@ -245,6 +295,17 @@ fn told_outcome(
 ) -> ExecutionOutcome {
     match result {
         Ok(response) => ExecutionOutcome::Told { model, response, populated },
+        Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
+    }
+}
+
+fn team_outcome(result: Result<xact_team::TeamResult, xact_mesut::AdapterError>) -> ExecutionOutcome {
+    match result {
+        Ok(result) => ExecutionOutcome::Teamed {
+            members: result.responses.into_iter().map(|response| response.member).collect(),
+            report: result.report,
+            populated: result.populated,
+        },
         Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
     }
 }

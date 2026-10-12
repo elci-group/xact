@@ -146,6 +146,52 @@ fn spawn_and_wait(program: &Path, args: &[&str], budget: &ResourceBudget) -> Res
         .map_err(|e| SpawnFailure::Other(ProcessError(format!("failed to wait for '{}': {e}", program.display()))))
 }
 
+/// Copies a regular file or directory tree without overwriting an existing
+/// destination. No ELci tool owns generic filesystem transfer, so this is a
+/// native Rust capability; `bank` remains the owner of empty-resource creation.
+pub fn copy_path(source: &Path, destination: &Path) -> Result<(), ProcessError> {
+    if destination.exists() {
+        return Err(ProcessError(format!("COPY refuses to overwrite existing destination {}.", destination.display())));
+    }
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|err| ProcessError(format!("COPY cannot read {}: {err}", source.display())))?;
+    if metadata.file_type().is_symlink() {
+        return Err(ProcessError("COPY does not support symbolic links yet.".into()));
+    }
+    if metadata.is_file() {
+        std::fs::copy(source, destination)
+            .map_err(|err| ProcessError(format!("COPY failed from {} to {}: {err}", source.display(), destination.display())))?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(ProcessError(format!("COPY supports files and directories, not {}.", source.display())));
+    }
+    copy_directory(source, destination)
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<(), ProcessError> {
+    std::fs::create_dir(destination)
+        .map_err(|err| ProcessError(format!("COPY cannot create {}: {err}", destination.display())))?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|err| ProcessError(format!("COPY cannot read {}: {err}", source.display())))?
+    {
+        let entry = entry.map_err(|err| ProcessError(format!("COPY could not enumerate {}: {err}", source.display())))?;
+        copy_path(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+/// Moves a path atomically where the platform supports it. Cross-filesystem
+/// moves fail rather than silently degrading into a copy-and-delete sequence.
+pub fn move_path(source: &Path, destination: &Path) -> Result<(), ProcessError> {
+    if destination.exists() {
+        return Err(ProcessError(format!("MOVE refuses to overwrite existing destination {}.", destination.display())));
+    }
+    std::fs::rename(source, destination).map_err(|err| {
+        ProcessError(format!("MOVE failed from {} to {}: {err}", source.display(), destination.display()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +354,33 @@ mod tests {
             &[PathBuf::from("/usr/bin")],
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn copy_recursively_preserves_a_directory_tree_and_refuses_overwrite() {
+        let root = std::env::temp_dir().join(format!("xact-copy-test-{}", std::process::id()));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("nested/file.txt"), "contents").unwrap();
+
+        copy_path(&source, &destination).unwrap();
+        assert_eq!(std::fs::read_to_string(destination.join("nested/file.txt")).unwrap(), "contents");
+        assert!(copy_path(&source, &destination).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn move_renames_without_leaving_the_source() {
+        let root = std::env::temp_dir().join(format!("xact-move-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        std::fs::write(&source, "contents").unwrap();
+
+        move_path(&source, &destination).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "contents");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
