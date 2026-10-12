@@ -25,8 +25,10 @@ use crate::TellError;
 /// `catalog::known_targets` just wants a plain list for completion and
 /// treats any failure as "nothing to add here".
 pub fn installed_models() -> Result<Vec<String>, TellError> {
-    let output =
-        Command::new("ollama").arg("list").output().map_err(|err| TellError(format!("failed to run ollama list: {err}")))?;
+    let output = Command::new("ollama")
+        .arg("list")
+        .output()
+        .map_err(|err| TellError(format!("failed to run ollama list: {err}")))?;
     if !output.status.success() {
         return Err(TellError(format!(
             "ollama list exited with {}: {}",

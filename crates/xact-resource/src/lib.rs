@@ -233,22 +233,20 @@ mod tests {
 
     #[test]
     fn unenforceable_resource_fails_before_spawning() {
-        let budget = ResourceBudget {
-            unenforceable: vec!["GPU".to_string()],
-            ..Default::default()
-        };
+        let budget = ResourceBudget { unenforceable: vec!["GPU".to_string()], ..Default::default() };
         let mut command = Command::new("true");
         assert!(apply(&mut command, &budget).is_err());
     }
 
     #[test]
-
     #[ignore = "live: requires cgroup v2 delegation"]
     fn cpu_budget_writes_a_real_cpu_max_file_and_cleans_up_after() {
         let budget = ResourceBudget { cpu_percent: Some(40), ..Default::default() };
         let mut command = Command::new("true");
 
-        let guard = apply(&mut command, &budget).expect("cgroup enforcement should be available on this system").expect("a non-empty budget should return a guard");
+        let guard = apply(&mut command, &budget)
+            .expect("cgroup enforcement should be available on this system")
+            .expect("a non-empty budget should return a guard");
         let cgroup_path = guard.path().to_path_buf();
 
         let cpu_max = fs::read_to_string(cgroup_path.join("cpu.max")).expect("cpu.max should exist");
@@ -262,13 +260,14 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires cgroup v2 delegation"]
     fn ram_budget_writes_an_absolute_byte_cap() {
         let budget = ResourceBudget { ram_percent: Some(50), ..Default::default() };
         let mut command = Command::new("true");
 
-        let guard = apply(&mut command, &budget).expect("cgroup enforcement should be available").expect("a non-empty budget should return a guard");
+        let guard = apply(&mut command, &budget)
+            .expect("cgroup enforcement should be available")
+            .expect("a non-empty budget should return a guard");
         let memory_max: u64 = fs::read_to_string(guard.path().join("memory.max"))
             .expect("memory.max should exist")
             .trim()
@@ -309,7 +308,9 @@ mod tests {
         let budget = ResourceBudget { cpu_percent: Some(10), ..Default::default() };
         let mut command = Command::new("sh");
         command.arg("-c").arg(busy_loop);
-        let guard = apply(&mut command, &budget).expect("cgroup enforcement should be available").expect("a non-empty budget should return a guard");
+        let guard = apply(&mut command, &budget)
+            .expect("cgroup enforcement should be available")
+            .expect("a non-empty budget should return a guard");
 
         let capped_start = std::time::Instant::now();
         command.status().expect("sh should launch under the cap");

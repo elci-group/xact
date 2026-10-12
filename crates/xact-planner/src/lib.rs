@@ -36,11 +36,17 @@ use xact_reference::{ReferenceContext, ResolvedObject};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionPlan {
     /// `CREATE` -> the `bank` tool (spec section 21).
-    Bank { path: PathBuf },
+    Bank {
+        path: PathBuf,
+    },
     /// `SEE` on a directory -> the `gls` tool.
-    ViewDirectory { path: PathBuf },
+    ViewDirectory {
+        path: PathBuf,
+    },
     /// `SEE` on a file -> the `bat` tool.
-    ViewFile { path: PathBuf },
+    ViewFile {
+        path: PathBuf,
+    },
     /// `RUN` -> native process execution (spec section 21: no ELci tool
     /// owns this). `domain` is the ownership the program's binary is
     /// resolved under: `MY` (explicit, or the default when the operand
@@ -49,13 +55,25 @@ pub enum ExecutionPlan {
     /// explicit `OUR` and as a fallback when `MY`'s `$PATH` search finds
     /// nothing (spec section 10 — real behavioral meaning for `RUN`
     /// specifically, not just grammar).
-    Run { command_line: String, domain: OwnershipKind },
+    Run {
+        command_line: String,
+        domain: OwnershipKind,
+    },
     /// `BOUND` -> the `bound` tool (spec sections 4, 12, 21). `destination`
     /// is `bound`'s own `--out` file; `None` means `bound`'s clipboard
     /// default applies.
-    Bound { source: PathBuf, destination: Option<PathBuf> },
-    Copy { source: PathBuf, destination: PathBuf },
-    Move { source: PathBuf, destination: PathBuf },
+    Bound {
+        source: PathBuf,
+        destination: Option<PathBuf>,
+    },
+    Copy {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Move {
+        source: PathBuf,
+        destination: PathBuf,
+    },
     /// `@ TELL` -> a real local agent provider (spec section 9;
     /// Xact–Mesut Integration Phase 7). `reading`/`populating` are already
     /// resolved to real paths; `model` is the target string verbatim
@@ -100,9 +118,7 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
                 return PlanOutcome::Unsupported("CREATE requires a target.".into());
             };
             match resolve_path(operand, references) {
-                Some(path) => PlanOutcome::Plan(ExecutionPlan::Bank {
-                    path: resolve_my_default_path(&path, operand),
-                }),
+                Some(path) => PlanOutcome::Plan(ExecutionPlan::Bank { path: resolve_my_default_path(&path, operand) }),
                 None => PlanOutcome::Unsupported("CREATE's target did not resolve to a path.".into()),
             }
         }
@@ -152,17 +168,26 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
                 },
                 None => None,
             };
-            PlanOutcome::Plan(ExecutionPlan::Bound { source: resolve_my_default_path(&raw_source, operand), destination })
+            PlanOutcome::Plan(ExecutionPlan::Bound {
+                source: resolve_my_default_path(&raw_source, operand),
+                destination,
+            })
         }
         xact_ast::Verb::Copy | xact_ast::Verb::Move => {
             let Some(source) = cmd.operand.as_ref().and_then(|operand| resolve_path(operand, references)) else {
                 return PlanOutcome::Unsupported(format!("{} requires a source.", cmd.verb.as_str()));
             };
             let Some(destination_operand) = &cmd.destination else {
-                return PlanOutcome::Unsupported(format!("{} requires a destination introduced by 'to'.", cmd.verb.as_str()));
+                return PlanOutcome::Unsupported(format!(
+                    "{} requires a destination introduced by 'to'.",
+                    cmd.verb.as_str()
+                ));
             };
             let Some(destination) = resolve_path(destination_operand, references) else {
-                return PlanOutcome::Unsupported(format!("{}'s destination did not resolve to a path.", cmd.verb.as_str()));
+                return PlanOutcome::Unsupported(format!(
+                    "{}'s destination did not resolve to a path.",
+                    cmd.verb.as_str()
+                ));
             };
             let source = resolve_my_default_path(&source, cmd.operand.as_ref().unwrap());
             let destination = resolve_my_default_path(&destination, destination_operand);
@@ -344,7 +369,8 @@ mod tests {
         with_test_home("/home/testuser", || {
             let references = ReferenceContext::new();
             for kind in [OwnershipKind::Our, OwnershipKind::Their] {
-                let cmd = create_command(Operand::Owned { kind, path: "project/README.md".into(), span: Span::default() });
+                let cmd =
+                    create_command(Operand::Owned { kind, path: "project/README.md".into(), span: Span::default() });
                 match plan(&cmd, &references) {
                     PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
                         assert_eq!(path, PathBuf::from("project/README.md"), "{kind:?}");
@@ -375,10 +401,7 @@ mod tests {
     fn create_with_reference_resolves_from_context() {
         let mut references = ReferenceContext::new();
         references.record(ResolvedObject::Path("/tmp/from-reference".into()));
-        let cmd = create_command(Operand::Reference {
-            kind: ReferenceKind::That,
-            span: Span::default(),
-        });
+        let cmd = create_command(Operand::Reference { kind: ReferenceKind::That, span: Span::default() });
         match plan(&cmd, &references) {
             PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
                 assert_eq!(path, PathBuf::from("/tmp/from-reference"));
@@ -393,11 +416,7 @@ mod tests {
         let cmd = Command::Imperative(ImperativeCommand {
             verb: Verb::Delete,
             verb_span: Span::default(),
-            operand: Some(Operand::Owned {
-                kind: OwnershipKind::My,
-                path: "~/x".into(),
-                span: Span::default(),
-            }),
+            operand: Some(Operand::Owned { kind: OwnershipKind::My, path: "~/x".into(), span: Span::default() }),
             destination: None,
             dependency: None,
         });
@@ -413,17 +432,18 @@ mod tests {
         let cmd = Command::Imperative(ImperativeCommand {
             verb: Verb::Run,
             verb_span: Span::default(),
-            operand: Some(Operand::StringArg {
-                value: "true".into(),
-                span: Span::default(),
-            }),
+            operand: Some(Operand::StringArg { value: "true".into(), span: Span::default() }),
             destination: None,
             dependency: None,
         });
         match plan(&cmd, &references) {
             PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain }) => {
                 assert_eq!(command_line, "true");
-                assert_eq!(domain, OwnershipKind::My, "a bare StringArg operand has no ownership, so RUN defaults to MY");
+                assert_eq!(
+                    domain,
+                    OwnershipKind::My,
+                    "a bare StringArg operand has no ownership, so RUN defaults to MY"
+                );
             }
             other => panic!("expected a run plan, got {other:?}"),
         }
@@ -436,17 +456,18 @@ mod tests {
         let cmd = Command::Imperative(ImperativeCommand {
             verb: Verb::Run,
             verb_span: Span::default(),
-            operand: Some(Operand::Reference {
-                kind: ReferenceKind::That,
-                span: Span::default(),
-            }),
+            operand: Some(Operand::Reference { kind: ReferenceKind::That, span: Span::default() }),
             destination: None,
             dependency: None,
         });
         match plan(&cmd, &references) {
             PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain }) => {
                 assert_eq!(command_line, "echo hi");
-                assert_eq!(domain, OwnershipKind::My, "a reference operand carries no ownership, so RUN defaults to MY");
+                assert_eq!(
+                    domain,
+                    OwnershipKind::My,
+                    "a reference operand carries no ownership, so RUN defaults to MY"
+                );
             }
             other => panic!("expected a run plan, got {other:?}"),
         }
@@ -458,11 +479,7 @@ mod tests {
         let cmd = Command::Imperative(ImperativeCommand {
             verb: Verb::Run,
             verb_span: Span::default(),
-            operand: Some(Operand::Owned {
-                kind: OwnershipKind::Our,
-                path: "chrome".into(),
-                span: Span::default(),
-            }),
+            operand: Some(Operand::Owned { kind: OwnershipKind::Our, path: "chrome".into(), span: Span::default() }),
             destination: None,
             dependency: None,
         });
@@ -485,11 +502,7 @@ mod tests {
         let cmd = Command::Imperative(ImperativeCommand {
             verb: Verb::Bound,
             verb_span: Span::default(),
-            operand: Some(Operand::Owned {
-                kind: OwnershipKind::My,
-                path: "~/project".into(),
-                span: Span::default(),
-            }),
+            operand: Some(Operand::Owned { kind: OwnershipKind::My, path: "~/project".into(), span: Span::default() }),
             destination: None,
             dependency: None,
         });

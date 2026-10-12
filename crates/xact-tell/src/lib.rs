@@ -209,8 +209,8 @@ fn aggregate_directory(path: &Path) -> Result<String, TellError> {
     ));
     xact_bound::aggregate(path, Some(&temp), &ResourceBudget::default())
         .map_err(|err| TellError(format!("failed to aggregate {}: {err}", path.display())))?;
-    let content = std::fs::read_to_string(&temp)
-        .map_err(|err| TellError(format!("failed to read aggregated context: {err}")))?;
+    let content =
+        std::fs::read_to_string(&temp).map_err(|err| TellError(format!("failed to read aggregated context: {err}")))?;
     let _ = std::fs::remove_file(&temp);
     Ok(content)
 }
@@ -307,13 +307,8 @@ mod tests {
 
     #[test]
     fn an_unenforceable_resource_fails_before_launching_ollama() {
-        let request = TellRequest {
-            model: "gemma3".into(),
-            persona: None,
-            reading: None,
-            instruction: "hi".into(),
-            think: None,
-        };
+        let request =
+            TellRequest { model: "gemma3".into(), persona: None, reading: None, instruction: "hi".into(), think: None };
         let budget = ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
         assert!(tell(&request, None, &budget).is_err());
     }

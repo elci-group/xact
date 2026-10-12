@@ -28,21 +28,11 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn incomplete(message: impl Into<String>, span: Span, expected: Vec<String>) -> Self {
-        Self {
-            kind: DiagnosticKind::Incomplete,
-            message: message.into(),
-            span,
-            expected,
-        }
+        Self { kind: DiagnosticKind::Incomplete, message: message.into(), span, expected }
     }
 
     pub fn invalid(message: impl Into<String>, span: Span, expected: Vec<String>) -> Self {
-        Self {
-            kind: DiagnosticKind::Invalid,
-            message: message.into(),
-            span,
-            expected,
-        }
+        Self { kind: DiagnosticKind::Invalid, message: message.into(), span, expected }
     }
 
     /// Whether this diagnostic blocks execution. Both kinds do — the only

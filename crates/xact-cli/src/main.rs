@@ -103,9 +103,9 @@ use std::sync::{Arc, Mutex};
 use nu_ansi_term::{Color, Style};
 use reedline::{
     default_emacs_keybindings, Completer, DefaultHinter, DescriptionMode, EditCommand, Editor, Emacs,
-    FileBackedHistory, Highlighter, IdeMenu, KeyCode, KeyModifiers, Keybindings, Menu, MenuBuilder, MenuEvent,
-    Painter, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu,
-    Signal, Span, StyledText, Suggestion, ValidationResult, Validator, Vi, HISTORY_SIZE,
+    FileBackedHistory, Highlighter, IdeMenu, KeyCode, KeyModifiers, Keybindings, Menu, MenuBuilder, MenuEvent, Painter,
+    Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal, Span, StyledText,
+    Suggestion, ValidationResult, Validator, Vi, HISTORY_SIZE,
 };
 use xact_ast::{AgentBlock, AgentClause, Command, Operand, PolicyArgs, PolicyOperator, PolicyStatement};
 use xact_completion_graph::agent_model_selection;
@@ -172,8 +172,7 @@ impl Completer for XactCompleter {
                 // resolved binary name, a resolved file) is a finished
                 // token, so a trailing space after accepting it is the
                 // useful default.
-                let append_whitespace =
-                    !value.starts_with('<') && !value.starts_with('\'') && !value.ends_with('/');
+                let append_whitespace = !value.starts_with('<') && !value.starts_with('\'') && !value.ends_with('/');
                 let description = keyword_description(&value).map(str::to_string);
                 Suggestion {
                     value,
@@ -297,7 +296,12 @@ impl Menu for SelfHidingMenu {
         self.inner.can_quick_complete()
     }
 
-    fn can_partially_complete(&mut self, values_updated: bool, editor: &mut Editor, completer: &mut dyn Completer) -> bool {
+    fn can_partially_complete(
+        &mut self,
+        values_updated: bool,
+        editor: &mut Editor,
+        completer: &mut dyn Completer,
+    ) -> bool {
         let completed = self.inner.can_partially_complete(values_updated, editor, completer);
         self.deactivate_if_empty();
         completed
@@ -881,8 +885,12 @@ fn print_outcome(branch: Option<&str>, outcome: &ExecutionOutcome) {
             }
             None => println!("{prefix}bound: aggregated {} to the clipboard", source.display()),
         },
-        ExecutionOutcome::Copied { source, destination } => println!("{prefix}copied {} to {}", source.display(), destination.display()),
-        ExecutionOutcome::Moved { source, destination } => println!("{prefix}moved {} to {}", source.display(), destination.display()),
+        ExecutionOutcome::Copied { source, destination } => {
+            println!("{prefix}copied {} to {}", source.display(), destination.display())
+        }
+        ExecutionOutcome::Moved { source, destination } => {
+            println!("{prefix}moved {} to {}", source.display(), destination.display())
+        }
         ExecutionOutcome::Told { model, response, populated } => {
             println!("{prefix}{model}: {response}");
             if let Some(populated) = populated {
@@ -1032,7 +1040,10 @@ fn process_submitted_input(
             println!("policy set: {}", describe_policy(&stmt));
             let already_enforced = matches!(
                 stmt.operator,
-                PolicyOperator::Concurrently | PolicyOperator::Consecutively | PolicyOperator::Spend | PolicyOperator::Save
+                PolicyOperator::Concurrently
+                    | PolicyOperator::Consecutively
+                    | PolicyOperator::Spend
+                    | PolicyOperator::Save
             );
             if !already_enforced {
                 println!("  (not yet enforced — the planner/executor are not implemented yet.)");
@@ -1072,7 +1083,9 @@ fn process_submitted_input(
 /// many times that takes — `line` here is always either empty or already
 /// whole: no separate continuation-reading step like [`run_batch`] needs.
 fn run_interactive(vi_mode: bool) {
-    println!("xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE, SEE, and RUN actually run");
+    println!(
+        "xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE, SEE, and RUN actually run"
+    );
     println!("Type a £ command, a ! policy statement, an @ agent block, or 'exit'.");
     println!("Suggestions narrow live as you type; invalid input is highlighted in red;");
     println!("Enter submits once the line is runnable, Shift+Enter always adds a line break.");
@@ -1314,7 +1327,10 @@ mod tests {
             suggestions.iter().map(|s| s.value.clone()).collect::<Vec<_>>(),
             agent_model_selection("@ TELL gem")
         );
-        assert!(suggestions.iter().all(|s| s.span == Span { start: 7, end: 10 }), "the partial 'gem' is what gets replaced");
+        assert!(
+            suggestions.iter().all(|s| s.span == Span { start: 7, end: 10 }),
+            "the partial 'gem' is what gets replaced"
+        );
     }
 
     #[test]
@@ -1339,10 +1355,9 @@ mod tests {
         );
         assert_eq!(
             char_binding('\''),
-            ReedlineEvent::Multiple(vec![
-                ReedlineEvent::Esc,
-                ReedlineEvent::Edit(vec![EditCommand::InsertChar('\'')]),
-            ])
+            ReedlineEvent::Multiple(
+                vec![ReedlineEvent::Esc, ReedlineEvent::Edit(vec![EditCommand::InsertChar('\'')]),]
+            )
         );
     }
 
@@ -1395,10 +1410,7 @@ mod tests {
 
     #[test]
     fn self_hiding_menu_shuts_off_when_empty_and_stays_on_when_stocked() {
-        let mut empty = SelfHidingMenu::new(Box::new(StubMenu {
-            active: true,
-            values: Vec::new(),
-        }));
+        let mut empty = SelfHidingMenu::new(Box::new(StubMenu { active: true, values: Vec::new() }));
         empty.deactivate_if_empty();
         assert!(!empty.is_active(), "an empty menu must be indistinguishable from a closed one");
 

@@ -333,31 +333,27 @@ fn submit<T: Send + 'static>(
 ) -> Result<PendingTask<T>, AdapterError> {
     let (tx, rx) = std::sync::mpsc::channel();
 
-    let work = Work::new(WorkKind::Blocking)
-        .with_label(label)
-        .with_job(move |_cancellation| {
-            let result = job();
-            // Mirrored into Mesut's own Work result so its Completed/Failed
-            // telemetry reflects the real domain outcome (a genuine adapter
-            // failure, e.g. a missing binary) rather than only whether this
-            // wrapper closure panicked. A normal nonzero exit status is
-            // still `Ok` here — `job()` only returns `Err` for a failure to
-            // launch at all, never for the process's own exit code.
-            let mesut_result = match &result {
-                Ok(_) => Ok(Vec::new()),
-                Err(message) => Err(TaskError::ExecutionFailed(message.clone())),
-            };
-            let _ = tx.send(result);
-            mesut_result
-        });
+    let work = Work::new(WorkKind::Blocking).with_label(label).with_job(move |_cancellation| {
+        let result = job();
+        // Mirrored into Mesut's own Work result so its Completed/Failed
+        // telemetry reflects the real domain outcome (a genuine adapter
+        // failure, e.g. a missing binary) rather than only whether this
+        // wrapper closure panicked. A normal nonzero exit status is
+        // still `Ok` here — `job()` only returns `Err` for a failure to
+        // launch at all, never for the process's own exit code.
+        let mesut_result = match &result {
+            Ok(_) => Ok(Vec::new()),
+            Err(message) => Err(TaskError::ExecutionFailed(message.clone())),
+        };
+        let _ = tx.send(result);
+        mesut_result
+    });
 
     // Subscribed before submission is admitted, so no event — not even
     // `Submitted` itself — can fire before there is a receiver for it.
     let events = shared_observer().subscribe(work.id);
 
-    tokio_runtime()
-        .block_on(shared_mesut().submit(work))
-        .map_err(|err| AdapterError(err.to_string()))?;
+    tokio_runtime().block_on(shared_mesut().submit(work)).map_err(|err| AdapterError(err.to_string()))?;
 
     Ok(PendingTask { rx, events })
 }
@@ -403,9 +399,7 @@ pub fn establish_path(path: PathBuf) -> Result<PathBuf, AdapterError> {
 /// Same as [`establish_path`], but returns immediately as an independent
 /// branch.
 pub fn establish_path_async(path: PathBuf) -> Result<PendingTask<PathBuf>, AdapterError> {
-    submit("xact.create", move || {
-        xact_bank::establish(&path).map_err(|err| err.to_string())
-    })
+    submit("xact.create", move || xact_bank::establish(&path).map_err(|err| err.to_string()))
 }
 
 /// Shows a directory with `gls` behind the Mesut adapter (`£ SEE`'s
@@ -417,9 +411,7 @@ pub fn view_directory(path: PathBuf) -> Result<(), AdapterError> {
 /// Same as [`view_directory`], but returns immediately as an independent
 /// branch.
 pub fn view_directory_async(path: PathBuf) -> Result<PendingTask<()>, AdapterError> {
-    submit("xact.see.directory", move || {
-        xact_see::view_directory(&path).map_err(|err| err.to_string())
-    })
+    submit("xact.see.directory", move || xact_see::view_directory(&path).map_err(|err| err.to_string()))
 }
 
 /// Shows a file with `bat` behind the Mesut adapter (`£ SEE`'s file
@@ -431,9 +423,7 @@ pub fn view_file(path: PathBuf) -> Result<(), AdapterError> {
 /// Same as [`view_file`], but returns immediately as an independent
 /// branch.
 pub fn view_file_async(path: PathBuf) -> Result<PendingTask<()>, AdapterError> {
-    submit("xact.see.file", move || {
-        xact_see::view_file(&path).map_err(|err| err.to_string())
-    })
+    submit("xact.see.file", move || xact_see::view_file(&path).map_err(|err| err.to_string()))
 }
 
 /// Aggregates `source` behind the Mesut adapter (`£ BOUND`'s execution
@@ -538,28 +528,34 @@ mod tests {
 
     #[test]
     fn run_process_reports_success() {
-        let outcome = run_process("true".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("true should launch");
+        let outcome = run_process("true".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default())
+            .expect("true should launch");
         assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0), signal: None });
     }
 
     #[test]
     fn run_process_reports_nonzero_exit_not_an_error() {
-        let outcome = run_process("false".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("false should launch");
+        let outcome = run_process("false".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default())
+            .expect("false should launch");
         assert_eq!(outcome, ProcessOutcome { success: false, code: Some(1), signal: None });
     }
 
     #[test]
     fn run_process_reports_missing_binary_as_an_error() {
-        let result = run_process("xact-definitely-not-a-real-binary".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default());
+        let result = run_process(
+            "xact-definitely-not-a-real-binary".into(),
+            xact_ast::OwnershipKind::My,
+            xact_ast::ResourceBudget::default(),
+        );
         assert!(result.is_err());
     }
 
     #[test]
-
     #[ignore = "live: requires cgroup v2 delegation"]
     fn run_process_applies_a_real_resource_budget() {
         let budget = xact_ast::ResourceBudget { cpu_percent: Some(50), ..Default::default() };
-        let outcome = run_process("true".into(), xact_ast::OwnershipKind::My, budget).expect("true should launch under a real cgroup cap");
+        let outcome = run_process("true".into(), xact_ast::OwnershipKind::My, budget)
+            .expect("true should launch under a real cgroup cap");
         assert_eq!(outcome, ProcessOutcome { success: true, code: Some(0), signal: None });
     }
 
@@ -570,7 +566,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires bank"]
     fn establish_path_actually_creates_the_path() {
         let dir = std::env::temp_dir().join(format!("xact-mesut-create-test-{}", std::process::id()));
@@ -586,7 +581,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires gls"]
     fn view_directory_runs_gls_through_the_adapter() {
         let result = view_directory(std::env::temp_dir());
@@ -594,7 +588,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires bound"]
     fn bound_aggregate_runs_the_real_bound_tool() {
         let dir = std::env::temp_dir().join(format!("xact-mesut-bound-test-{}", std::process::id()));
@@ -652,8 +645,8 @@ mod tests {
             think: None,
         };
 
-        let mut branch = tell_async(request, None, xact_ast::ResourceBudget::default())
-            .expect("submission should be admitted");
+        let mut branch =
+            tell_async(request, None, xact_ast::ResourceBudget::default()).expect("submission should be admitted");
 
         let mut events = Vec::new();
         let response = loop {
@@ -680,7 +673,10 @@ mod tests {
         let start = std::time::Instant::now();
 
         let branches: Vec<_> = (0..3)
-            .map(|_| run_process_async("sleep 1".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("submission should be admitted"))
+            .map(|_| {
+                run_process_async("sleep 1".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default())
+                    .expect("submission should be admitted")
+            })
             .collect();
 
         for branch in branches {
@@ -697,7 +693,9 @@ mod tests {
 
     #[test]
     fn try_join_reports_none_while_still_running_then_some_once_done() {
-        let mut branch = run_process_async("sleep 1".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("submission should be admitted");
+        let mut branch =
+            run_process_async("sleep 1".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default())
+                .expect("submission should be admitted");
 
         assert!(branch.try_join().is_none(), "should still be running immediately after submission");
 
@@ -710,7 +708,9 @@ mod tests {
     /// one terminal event (`Completed` here, since `true` succeeds).
     #[test]
     fn drain_events_reports_real_lifecycle_including_a_terminal_event() {
-        let mut branch = run_process_async("true".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default()).expect("submission should be admitted");
+        let mut branch =
+            run_process_async("true".into(), xact_ast::OwnershipKind::My, xact_ast::ResourceBudget::default())
+                .expect("submission should be admitted");
 
         // The result (via try_join) and the terminal lifecycle event are
         // delivered through independent channels and can arrive in either

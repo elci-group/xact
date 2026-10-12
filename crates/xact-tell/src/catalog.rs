@@ -25,7 +25,10 @@ use crate::{anthropic, groq, harness, moonshot, ollama, openai, openrouter, xai,
 /// `xact`.
 const TTL: Duration = Duration::from_secs(300);
 
-static CACHE: LazyLock<Mutex<HashMap<&'static str, (Instant, Vec<String>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// When each source was last fetched, and what it returned.
+type Cache = HashMap<&'static str, (Instant, Vec<String>)>;
+
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// `fetch`'s result for `key`, reused until [`TTL`] elapses.
 fn cached(key: &'static str, fetch: impl FnOnce() -> Vec<String>) -> Vec<String> {

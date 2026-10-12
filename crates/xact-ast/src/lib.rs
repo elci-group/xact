@@ -67,7 +67,7 @@ impl Verb {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "SEE" => Verb::See,
             "EDIT" => Verb::Edit,
@@ -107,7 +107,7 @@ impl OwnershipKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "MY" => OwnershipKind::My,
             "OUR" => OwnershipKind::Our,
@@ -133,7 +133,7 @@ impl ReferenceKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "THIS" => ReferenceKind::This,
             "THAT" => ReferenceKind::That,
@@ -147,19 +147,9 @@ impl ReferenceKind {
 /// (spec section 11: an unresolved reference is a semantic error).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operand {
-    Owned {
-        kind: OwnershipKind,
-        path: String,
-        span: Span,
-    },
-    Reference {
-        kind: ReferenceKind,
-        span: Span,
-    },
-    StringArg {
-        value: String,
-        span: Span,
-    },
+    Owned { kind: OwnershipKind, path: String, span: Span },
+    Reference { kind: ReferenceKind, span: Span },
+    StringArg { value: String, span: Span },
 }
 
 impl Operand {
@@ -190,7 +180,7 @@ impl SuccessCondition {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "SUCCEEDS" => SuccessCondition::Succeeds,
             "FAILS" => SuccessCondition::Fails,
@@ -297,7 +287,7 @@ impl PolicyOperator {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "WITH" => PolicyOperator::With,
             "WITHOUT" => PolicyOperator::Without,
@@ -327,10 +317,7 @@ impl PolicyOperator {
     /// and a soft preference may never override one (section 27's policy
     /// invariant).
     pub fn is_hard_constraint(&self) -> bool {
-        matches!(
-            self,
-            PolicyOperator::With | PolicyOperator::Without | PolicyOperator::Spend | PolicyOperator::Save
-        )
+        matches!(self, PolicyOperator::With | PolicyOperator::Without | PolicyOperator::Spend | PolicyOperator::Save)
     }
 
     /// Scheduling mode is chosen once per block (spec section 16: a
@@ -423,7 +410,7 @@ impl AgentVerb {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "TELL" => AgentVerb::Tell,
             "TEAM" => AgentVerb::Team,
@@ -442,12 +429,8 @@ pub enum AgentClauseKind {
 }
 
 impl AgentClauseKind {
-    pub const ALL: [AgentClauseKind; 4] = [
-        AgentClauseKind::Be,
-        AgentClauseKind::Reading,
-        AgentClauseKind::Populating,
-        AgentClauseKind::Think,
-    ];
+    pub const ALL: [AgentClauseKind; 4] =
+        [AgentClauseKind::Be, AgentClauseKind::Reading, AgentClauseKind::Populating, AgentClauseKind::Think];
 
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -458,7 +441,7 @@ impl AgentClauseKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "BE" => AgentClauseKind::Be,
             "READING" => AgentClauseKind::Reading,

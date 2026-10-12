@@ -52,10 +52,7 @@ pub fn validate(
     references: &ReferenceContext,
 ) -> Result<ValidatedCommand, Vec<Diagnostic>> {
     match &command {
-        Command::Identity(_) => Ok(ValidatedCommand {
-            command,
-            establishes: None,
-        }),
+        Command::Identity(_) => Ok(ValidatedCommand { command, establishes: None }),
         Command::Imperative(cmd) => {
             let mut diagnostics = Vec::new();
             check_operand(cmd.operand.as_ref(), identity, references, &mut diagnostics);
@@ -95,11 +92,7 @@ pub fn check_operand(
 ) {
     let Some(operand) = operand else { return };
     match operand {
-        Operand::Owned {
-            kind: OwnershipKind::Their,
-            span,
-            ..
-        } => {
+        Operand::Owned { kind: OwnershipKind::Their, span, .. } => {
             if !identity.established() {
                 diagnostics.push(Diagnostic::invalid(
                     "THEIR cannot be used before an identity is established (e.g. £ THEY are \"alice,bob\").",
@@ -151,11 +144,8 @@ mod tests {
     fn their_rejected_without_identity() {
         let identity = IdentityContext::new();
         let references = ReferenceContext::new();
-        let cmd = imperative(Some(Operand::Owned {
-            kind: OwnershipKind::Their,
-            path: "~/x".into(),
-            span: Span::default(),
-        }));
+        let cmd =
+            imperative(Some(Operand::Owned { kind: OwnershipKind::Their, path: "~/x".into(), span: Span::default() }));
         let result = validate(cmd, &identity, &references);
         assert!(result.is_err());
     }
@@ -165,11 +155,8 @@ mod tests {
         let mut identity = IdentityContext::new();
         identity.set(vec!["alice".into()]);
         let references = ReferenceContext::new();
-        let cmd = imperative(Some(Operand::Owned {
-            kind: OwnershipKind::Their,
-            path: "~/x".into(),
-            span: Span::default(),
-        }));
+        let cmd =
+            imperative(Some(Operand::Owned { kind: OwnershipKind::Their, path: "~/x".into(), span: Span::default() }));
         assert!(validate(cmd, &identity, &references).is_ok());
     }
 
@@ -177,10 +164,7 @@ mod tests {
     fn unresolved_that_rejected() {
         let identity = IdentityContext::new();
         let references = ReferenceContext::new();
-        let cmd = imperative(Some(Operand::Reference {
-            kind: xact_ast::ReferenceKind::That,
-            span: Span::default(),
-        }));
+        let cmd = imperative(Some(Operand::Reference { kind: xact_ast::ReferenceKind::That, span: Span::default() }));
         assert!(validate(cmd, &identity, &references).is_err());
     }
 
@@ -189,15 +173,9 @@ mod tests {
         let identity = IdentityContext::new();
         let mut references = ReferenceContext::new();
         references.record(ResolvedObject::Path("~/project/README.md".into()));
-        let cmd = imperative(Some(Operand::Reference {
-            kind: xact_ast::ReferenceKind::That,
-            span: Span::default(),
-        }));
+        let cmd = imperative(Some(Operand::Reference { kind: xact_ast::ReferenceKind::That, span: Span::default() }));
         let validated = validate(cmd, &identity, &references).expect("should validate");
-        assert_eq!(
-            validated.establishes,
-            Some(ResolvedObject::Path("~/project/README.md".into()))
-        );
+        assert_eq!(validated.establishes, Some(ResolvedObject::Path("~/project/README.md".into())));
     }
 
     fn dependency_command(reference: xact_ast::ReferenceKind, condition: xact_ast::SuccessCondition) -> Command {

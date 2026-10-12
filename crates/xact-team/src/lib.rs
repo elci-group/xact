@@ -55,12 +55,8 @@ impl TeamRequest {
         instruction: String,
         think: Option<u32>,
     ) -> Result<Self, TeamError> {
-        let members: Vec<String> = roster
-            .split(',')
-            .map(str::trim)
-            .filter(|member| !member.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let members: Vec<String> =
+            roster.split(',').map(str::trim).filter(|member| !member.is_empty()).map(str::to_owned).collect();
 
         if members.len() < 2 {
             return Err(TeamError(
@@ -127,9 +123,7 @@ where
 
     let mut responses = Vec::with_capacity(workers.len());
     for worker in workers {
-        let (member, response) = worker
-            .join()
-            .map_err(|_| TeamError("a TEAM member worker panicked.".into()))?;
+        let (member, response) = worker.join().map_err(|_| TeamError("a TEAM member worker panicked.".into()))?;
         let response = response.map_err(|err| TeamError(format!("TEAM member '{member}' failed: {err}")))?;
         responses.push(TeamResponse { member, response });
     }
@@ -180,7 +174,11 @@ mod tests {
     #[test]
     fn a_member_failure_fails_the_team_without_a_report() {
         let result = execute_with(&request("first, second"), &ResourceBudget::default(), |member, _| {
-            if member.model == "second" { Err("nope".into()) } else { Ok("ok".into()) }
+            if member.model == "second" {
+                Err("nope".into())
+            } else {
+                Ok("ok".into())
+            }
         });
         assert!(result.unwrap_err().to_string().contains("second"));
     }

@@ -60,9 +60,6 @@ mod tests {
     fn resolves_after_recording() {
         let mut ctx = ReferenceContext::new();
         ctx.record(ResolvedObject::Path("~/project/README.md".into()));
-        assert_eq!(
-            ctx.resolve(ReferenceKind::That),
-            Some(&ResolvedObject::Path("~/project/README.md".into()))
-        );
+        assert_eq!(ctx.resolve(ReferenceKind::That), Some(&ResolvedObject::Path("~/project/README.md".into())));
     }
 }

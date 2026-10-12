@@ -271,19 +271,12 @@ mod tests {
         PolicyStatement {
             operator: op,
             operator_span: Span::default(),
-            args: PolicyArgs::Capability {
-                name: name.to_string(),
-                span: Span::default(),
-            },
+            args: PolicyArgs::Capability { name: name.to_string(), span: Span::default() },
         }
     }
 
     fn schedule(op: PolicyOperator) -> PolicyStatement {
-        PolicyStatement {
-            operator: op,
-            operator_span: Span::default(),
-            args: PolicyArgs::None,
-        }
+        PolicyStatement { operator: op, operator_span: Span::default(), args: PolicyArgs::None }
     }
 
     fn quotas(op: PolicyOperator, entries: &[(u32, &str)]) -> PolicyStatement {

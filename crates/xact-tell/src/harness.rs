@@ -101,8 +101,8 @@ pub fn run(binary: &str, flag: &str, prompt: &str, budget: &ResourceBudget) -> R
     let mut command = Command::new(binary);
     command.arg(flag).arg(prompt);
 
-    let _resource_guard =
-        xact_resource::apply(&mut command, budget).map_err(|err| TellError(format!("cannot honour the active resource policy: {err}")))?;
+    let _resource_guard = xact_resource::apply(&mut command, budget)
+        .map_err(|err| TellError(format!("cannot honour the active resource policy: {err}")))?;
 
     command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let child = command.spawn().map_err(|err| TellError(format!("failed to run {binary}: {err}")))?;

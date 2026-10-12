@@ -4,7 +4,7 @@
 //! search-directory list or a fallback rule on its own — they ask this
 //! crate, which asks the same Padagonia-backed ontology graph either way.
 //! Before this crate existed, `xact-process` had its own `SYSTEM_BIN_DIRS`
-//! + directory scan, `xact-planner` had its own `~` expansion, and an
+//! plus a directory scan, `xact-planner` had its own `~` expansion, and an
 //! earlier draft of autocomplete had a *third*, independent copy of both —
 //! three places that had to be kept in sync by hand, and weren't
 //! guaranteed to be. That's exactly the failure mode this crate closes:
@@ -93,17 +93,9 @@ fn build_graph() -> (Store, HashMap<&'static str, NodeId>) {
     }
 
     let filesystem_path = resolver_nodes[ResolverKind::FilesystemPath.label()];
-    for verb in [
-        Verb::See,
-        Verb::Edit,
-        Verb::Move,
-        Verb::Copy,
-        Verb::Paste,
-        Verb::Cut,
-        Verb::Delete,
-        Verb::Create,
-        Verb::Bound,
-    ] {
+    for verb in
+        [Verb::See, Verb::Edit, Verb::Move, Verb::Copy, Verb::Paste, Verb::Cut, Verb::Delete, Verb::Create, Verb::Bound]
+    {
         store.add_edge(
             verb_nodes[verb.as_str()],
             filesystem_path,
@@ -537,7 +529,7 @@ mod tests {
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         fs::set_permissions(&script, perms).unwrap();
 
-        let found = find_binary_in_dirs("xact-resolve-stub", &[dir.clone()]);
+        let found = find_binary_in_dirs("xact-resolve-stub", std::slice::from_ref(&dir));
         assert_eq!(found, Some(script));
 
         fs::remove_dir_all(&dir).ok();
@@ -621,7 +613,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires gls"]
     fn list_path_entries_finds_real_filesystem_matches() {
         let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -661,11 +652,7 @@ mod tests {
         everything.sort();
         assert_eq!(
             everything,
-            vec![
-                format!("{base}alpha.txt"),
-                format!("{base}apricot.txt"),
-                format!("{base}beta.txt"),
-            ]
+            vec![format!("{base}alpha.txt"), format!("{base}apricot.txt"), format!("{base}beta.txt"),]
         );
 
         let narrowed_input = format!("{base}a");
@@ -685,7 +672,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires gls"]
     fn hidden_entries_are_included_matching_the_pre_gls_behavior() {
         let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());

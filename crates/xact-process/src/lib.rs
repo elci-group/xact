@@ -91,9 +91,7 @@ fn run_with_dirs(
     if domain == OwnershipKind::Our {
         return match xact_resolve::find_binary_in_dirs(program, our_dirs) {
             Some(resolved) => spawn_and_wait(&resolved, &args, budget).map_err(|f| f.describe(program)),
-            None => Err(ProcessError(format!(
-                "'{program}' was not found in Xact's shared system binary directories."
-            ))),
+            None => Err(ProcessError(format!("'{program}' was not found in Xact's shared system binary directories."))),
         };
     }
 
@@ -129,16 +127,13 @@ fn spawn_and_wait(program: &Path, args: &[&str], budget: &ResourceBudget) -> Res
     let mut command = Command::new(program);
     command.args(args);
 
-    let _resource_guard = xact_resource::apply(&mut command, budget).map_err(|err| {
-        SpawnFailure::Other(ProcessError(format!("cannot honour the active resource policy: {err}")))
-    })?;
+    let _resource_guard = xact_resource::apply(&mut command, budget)
+        .map_err(|err| SpawnFailure::Other(ProcessError(format!("cannot honour the active resource policy: {err}"))))?;
 
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(SpawnFailure::NotFound),
-        Err(e) => {
-            return Err(SpawnFailure::Other(ProcessError(format!("failed to run '{}': {e}", program.display()))))
-        }
+        Err(e) => return Err(SpawnFailure::Other(ProcessError(format!("failed to run '{}': {e}", program.display())))),
     };
     let _cancel_guard = xact_cancel::register(child.id());
     child
@@ -159,8 +154,9 @@ pub fn copy_path(source: &Path, destination: &Path) -> Result<(), ProcessError> 
         return Err(ProcessError("COPY does not support symbolic links yet.".into()));
     }
     if metadata.is_file() {
-        std::fs::copy(source, destination)
-            .map_err(|err| ProcessError(format!("COPY failed from {} to {}: {err}", source.display(), destination.display())))?;
+        std::fs::copy(source, destination).map_err(|err| {
+            ProcessError(format!("COPY failed from {} to {}: {err}", source.display(), destination.display()))
+        })?;
         return Ok(());
     }
     if !metadata.is_dir() {
@@ -175,7 +171,8 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), ProcessError>
     for entry in std::fs::read_dir(source)
         .map_err(|err| ProcessError(format!("COPY cannot read {}: {err}", source.display())))?
     {
-        let entry = entry.map_err(|err| ProcessError(format!("COPY could not enumerate {}: {err}", source.display())))?;
+        let entry =
+            entry.map_err(|err| ProcessError(format!("COPY could not enumerate {}: {err}", source.display())))?;
         copy_path(&entry.path(), &destination.join(entry.file_name()))?;
     }
     Ok(())
@@ -238,7 +235,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires cgroup v2 delegation"]
     fn a_real_resource_budget_actually_caps_the_process() {
         let budget = ResourceBudget { cpu_percent: Some(40), ..Default::default() };
@@ -323,9 +319,8 @@ mod tests {
         // Not a real $PATH-findable name, so the primary attempt must
         // fail with NotFound and MY must fall back to the given OUR
         // directory to find it.
-        let status =
-            run_with_dirs("xact-fallback-stub", OwnershipKind::My, &ResourceBudget::default(), &[dir_path])
-                .expect("MY should fall back to the OUR directory and find the stub");
+        let status = run_with_dirs("xact-fallback-stub", OwnershipKind::My, &ResourceBudget::default(), &[dir_path])
+            .expect("MY should fall back to the OUR directory and find the stub");
         assert!(status.success());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -337,8 +332,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let dir_path = write_stub(&dir, "xact-their-stub");
 
-        let result =
-            run_with_dirs("xact-their-stub", OwnershipKind::Their, &ResourceBudget::default(), &[dir_path]);
+        let result = run_with_dirs("xact-their-stub", OwnershipKind::Their, &ResourceBudget::default(), &[dir_path]);
         assert!(result.is_err(), "THEIR should behave like a plain $PATH search, with no OUR fallback");
 
         let _ = std::fs::remove_dir_all(&dir);

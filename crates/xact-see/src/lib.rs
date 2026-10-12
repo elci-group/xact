@@ -37,10 +37,7 @@ pub fn view_file(path: &Path) -> Result<(), SeeError> {
 }
 
 fn run(tool: &str, path: &Path) -> Result<(), SeeError> {
-    let status = Command::new(tool)
-        .arg(path)
-        .status()
-        .map_err(|e| SeeError(format!("failed to run {tool}: {e}")))?;
+    let status = Command::new(tool).arg(path).status().map_err(|e| SeeError(format!("failed to run {tool}: {e}")))?;
 
     if status.success() {
         Ok(())

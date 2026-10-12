@@ -127,7 +127,7 @@ fn agent_tell_target(input: &str) -> Option<String> {
     let TokenKind::Word(verb_word) = &verb.kind else {
         return None;
     };
-    let agent_verb = AgentVerb::from_str(&verb_word.to_uppercase());
+    let agent_verb = AgentVerb::parse(&verb_word.to_uppercase());
     if !matches!(agent_verb, Some(AgentVerb::Tell | AgentVerb::Team)) {
         return None;
     }
@@ -358,7 +358,11 @@ mod tests {
     fn model_selection_narrows_the_forced_list_while_the_target_is_typed() {
         let selectable = xact_tell::selectable_models();
         assert_eq!(agent_model_selection("@ TELL g"), rank_targets(selectable.clone(), "g"));
-        assert_eq!(agent_model_selection("@ TELL 'gp"), rank_targets(selectable, "gp"), "an open quote narrows the same way");
+        assert_eq!(
+            agent_model_selection("@ TELL 'gp"),
+            rank_targets(selectable, "gp"),
+            "an open quote narrows the same way"
+        );
     }
 
     #[test]
@@ -366,7 +370,10 @@ mod tests {
         assert!(agent_model_selection("@ TELL").is_empty(), "no delimiter yet — the verb is still being typed");
         assert!(agent_model_selection("@ TEAM ").is_empty(), "TEAM's roster slot is not a forced model selection");
         assert!(agent_model_selection("@ TEAM gp").is_empty());
-        assert!(agent_model_selection("@ TELL gemma3 ").is_empty(), "target established — this is the clause position now");
+        assert!(
+            agent_model_selection("@ TELL gemma3 ").is_empty(),
+            "target established — this is the clause position now"
+        );
         assert!(agent_model_selection("@ TELL gemma3 BE").is_empty());
         assert!(agent_model_selection("£ SEE ").is_empty());
         assert!(agent_model_selection("@ ").is_empty());
@@ -380,8 +387,12 @@ mod tests {
 
     #[test]
     fn rank_targets_prefers_exact_case_prefix_over_case_insensitive_prefix_over_substring() {
-        let candidates =
-            vec!["mid-GPT-thing".to_string(), "gpt-4o".to_string(), "GPT-4o-mini".to_string(), "claude-opus-5".to_string()];
+        let candidates = vec![
+            "mid-GPT-thing".to_string(),
+            "gpt-4o".to_string(),
+            "GPT-4o-mini".to_string(),
+            "claude-opus-5".to_string(),
+        ];
         let ranked = rank_targets(candidates, "GPT");
         assert_eq!(ranked, vec!["GPT-4o-mini".to_string(), "gpt-4o".to_string(), "mid-GPT-thing".to_string()]);
     }
@@ -394,7 +405,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires gls"]
     fn resolves_real_filesystem_entries_after_an_ownership_keyword() {
         let dir = std::env::temp_dir().join(format!("xact-completion-graph-test-{}", std::process::id()));
@@ -472,7 +482,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires gls"]
     fn does_not_resolve_binaries_for_a_path_taking_verb() {
         // SEE has only a filesystem_path resolver (confirmed structurally

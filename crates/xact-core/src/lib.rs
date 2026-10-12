@@ -51,7 +51,8 @@ impl Session {
 
     pub fn submit(&mut self, input: &str) -> SessionOutcome {
         match parse_line(input) {
-            ParseOutcome::Complete(Line::Command(command)) => match validate(command, &self.identity, &self.references) {
+            ParseOutcome::Complete(Line::Command(command)) => match validate(command, &self.identity, &self.references)
+            {
                 Ok(validated) => {
                     if let Command::Identity(decl) = &validated.command {
                         self.identity.set(decl.members.clone());
@@ -167,27 +168,15 @@ mod tests {
     #[test]
     fn their_rejected_then_accepted_after_identity() {
         let mut session = Session::new();
-        assert!(matches!(
-            session.submit("£ SEE THEIR ~/shared"),
-            SessionOutcome::Rejected(_)
-        ));
-        assert!(matches!(
-            session.submit("£ THEY are \"alice,bob\""),
-            SessionOutcome::Accepted(_)
-        ));
-        assert!(matches!(
-            session.submit("£ SEE THEIR ~/shared"),
-            SessionOutcome::Accepted(_)
-        ));
+        assert!(matches!(session.submit("£ SEE THEIR ~/shared"), SessionOutcome::Rejected(_)));
+        assert!(matches!(session.submit("£ THEY are \"alice,bob\""), SessionOutcome::Accepted(_)));
+        assert!(matches!(session.submit("£ SEE THEIR ~/shared"), SessionOutcome::Accepted(_)));
     }
 
     #[test]
     fn that_resolves_to_previously_established_object() {
         let mut session = Session::new();
-        assert!(matches!(
-            session.submit("£ SEE MY ~/project/README.md"),
-            SessionOutcome::Accepted(_)
-        ));
+        assert!(matches!(session.submit("£ SEE MY ~/project/README.md"), SessionOutcome::Accepted(_)));
         assert!(matches!(session.submit("£ EDIT THAT"), SessionOutcome::Accepted(_)));
     }
 
@@ -206,27 +195,15 @@ mod tests {
     #[test]
     fn policy_statement_accepted_and_tracked_across_session() {
         let mut session = Session::new();
-        assert!(matches!(
-            session.submit("! SAVE 20%RAM 30%CPU"),
-            SessionOutcome::PolicyAccepted(_)
-        ));
-        assert!(matches!(
-            session.submit("£ RUN 'chrome'"),
-            SessionOutcome::Accepted(_)
-        ));
+        assert!(matches!(session.submit("! SAVE 20%RAM 30%CPU"), SessionOutcome::PolicyAccepted(_)));
+        assert!(matches!(session.submit("£ RUN 'chrome'"), SessionOutcome::Accepted(_)));
     }
 
     #[test]
     fn conflicting_policy_statements_rejected() {
         let mut session = Session::new();
-        assert!(matches!(
-            session.submit("! CONCURRENTLY"),
-            SessionOutcome::PolicyAccepted(_)
-        ));
-        assert!(matches!(
-            session.submit("! CONSECUTIVELY"),
-            SessionOutcome::Rejected(_)
-        ));
+        assert!(matches!(session.submit("! CONCURRENTLY"), SessionOutcome::PolicyAccepted(_)));
+        assert!(matches!(session.submit("! CONSECUTIVELY"), SessionOutcome::Rejected(_)));
     }
 
     #[test]
@@ -251,23 +228,14 @@ mod tests {
     #[test]
     fn agent_reading_their_rejected_without_identity() {
         let mut session = Session::new();
-        assert!(matches!(
-            session.submit("@ TELL 'x' READING THEIR ~/shared \"go\""),
-            SessionOutcome::Rejected(_)
-        ));
+        assert!(matches!(session.submit("@ TELL 'x' READING THEIR ~/shared \"go\""), SessionOutcome::Rejected(_)));
     }
 
     #[test]
     fn agent_populating_that_resolves_from_prior_command() {
         let mut session = Session::new();
-        assert!(matches!(
-            session.submit("£ SEE MY ~/project/review/"),
-            SessionOutcome::Accepted(_)
-        ));
-        assert!(matches!(
-            session.submit("@ TELL 'x' POPULATING THAT \"go\""),
-            SessionOutcome::AgentAccepted(_)
-        ));
+        assert!(matches!(session.submit("£ SEE MY ~/project/review/"), SessionOutcome::Accepted(_)));
+        assert!(matches!(session.submit("@ TELL 'x' POPULATING THAT \"go\""), SessionOutcome::AgentAccepted(_)));
     }
 
     fn when_that(condition: &str) -> String {

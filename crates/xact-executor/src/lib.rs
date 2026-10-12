@@ -59,10 +59,15 @@ use xact_planner::ExecutionPlan;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionOutcome {
-    BankEstablished { path: PathBuf },
+    BankEstablished {
+        path: PathBuf,
+    },
     /// A directory or file was shown via `gls`/`bat`, whose own inherited
     /// stdio already rendered the content — `tool` names which one ran.
-    Viewed { path: PathBuf, tool: &'static str },
+    Viewed {
+        path: PathBuf,
+        tool: &'static str,
+    },
     /// A process ran to completion. `success`/`code` report how it
     /// exited — a nonzero exit is a normal outcome (e.g. `grep` finding no
     /// matches), not an execution failure; [`ExecutionOutcome::Failed`] is
@@ -78,47 +83,65 @@ pub enum ExecutionOutcome {
     },
     /// A source set was aggregated via `bound` — `destination` names
     /// where, or `None` for `bound`'s own clipboard default.
-    Bounded { source: PathBuf, destination: Option<PathBuf> },
-    Copied { source: PathBuf, destination: PathBuf },
-    Moved { source: PathBuf, destination: PathBuf },
+    Bounded {
+        source: PathBuf,
+        destination: Option<PathBuf>,
+    },
+    Copied {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Moved {
+        source: PathBuf,
+        destination: PathBuf,
+    },
     /// A `@ TELL` block ran against a real agent provider. `populated`
     /// names where the response was also written, if `POPULATING` was
     /// stated.
-    Told { model: String, response: String, populated: Option<PathBuf> },
+    Told {
+        model: String,
+        response: String,
+        populated: Option<PathBuf>,
+    },
     /// A `@ TEAM` roster completed. `report` contains one labelled response
     /// per member in the order the user stated in the roster.
-    Teamed { members: Vec<String>, report: String, populated: Option<PathBuf> },
-    Failed { message: String },
+    Teamed {
+        members: Vec<String>,
+        report: String,
+        populated: Option<PathBuf>,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 pub fn execute(plan: ExecutionPlan, budget: ResourceBudget) -> ExecutionOutcome {
     match plan {
         ExecutionPlan::Bank { path } => bank_outcome(xact_mesut::establish_path(path)),
-        ExecutionPlan::ViewDirectory { path } => {
-            view_outcome(path.clone(), "gls", xact_mesut::view_directory(path))
-        }
+        ExecutionPlan::ViewDirectory { path } => view_outcome(path.clone(), "gls", xact_mesut::view_directory(path)),
         ExecutionPlan::ViewFile { path } => view_outcome(path.clone(), "bat", xact_mesut::view_file(path)),
         ExecutionPlan::Run { command_line, domain } => {
             run_outcome(command_line.clone(), xact_mesut::run_process(command_line, domain, budget))
         }
-        ExecutionPlan::Bound { source, destination } => bound_outcome(
-            source.clone(),
-            destination.clone(),
-            xact_mesut::bound_aggregate(source, destination, budget),
-        ),
-        ExecutionPlan::Copy { source, destination } => transfer_outcome(source.clone(), destination.clone(), false, xact_mesut::copy_path(source, destination)),
-        ExecutionPlan::Move { source, destination } => transfer_outcome(source.clone(), destination.clone(), true, xact_mesut::move_path(source, destination)),
+        ExecutionPlan::Bound { source, destination } => {
+            bound_outcome(source.clone(), destination.clone(), xact_mesut::bound_aggregate(source, destination, budget))
+        }
+        ExecutionPlan::Copy { source, destination } => {
+            transfer_outcome(source.clone(), destination.clone(), false, xact_mesut::copy_path(source, destination))
+        }
+        ExecutionPlan::Move { source, destination } => {
+            transfer_outcome(source.clone(), destination.clone(), true, xact_mesut::move_path(source, destination))
+        }
         ExecutionPlan::Agent { model, persona, reading, populating, think, instruction } => {
             let request = xact_tell::TellRequest { model: model.clone(), persona, reading, instruction, think };
             told_outcome(model, populating.clone(), xact_mesut::tell(request, populating, budget))
         }
         ExecutionPlan::Team { roster, persona, reading, populating, think, instruction } => {
-            let request = match xact_team::TeamRequest::from_roster(
-                &roster, persona, reading, populating, instruction, think,
-            ) {
-                Ok(request) => request,
-                Err(err) => return ExecutionOutcome::Failed { message: err.to_string() },
-            };
+            let request =
+                match xact_team::TeamRequest::from_roster(&roster, persona, reading, populating, instruction, think) {
+                    Ok(request) => request,
+                    Err(err) => return ExecutionOutcome::Failed { message: err.to_string() },
+                };
             team_outcome(xact_mesut::team(request, budget))
         }
     }
@@ -154,10 +177,12 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
                 .map(|task| Pending(PendingKind::Bound { source, destination, task }))
                 .map_err(submission_failed)
         }
-        ExecutionPlan::Copy { source, destination } => xact_mesut::copy_path_async(source.clone(), destination.clone(), )
-            .map(|task| Pending(PendingKind::Copy { source, destination, task })).map_err(submission_failed),
+        ExecutionPlan::Copy { source, destination } => xact_mesut::copy_path_async(source.clone(), destination.clone())
+            .map(|task| Pending(PendingKind::Copy { source, destination, task }))
+            .map_err(submission_failed),
         ExecutionPlan::Move { source, destination } => xact_mesut::move_path_async(source.clone(), destination.clone())
-            .map(|task| Pending(PendingKind::Move { source, destination, task })).map_err(submission_failed),
+            .map(|task| Pending(PendingKind::Move { source, destination, task }))
+            .map_err(submission_failed),
         ExecutionPlan::Agent { model, persona, reading, populating, think, instruction } => {
             let request = xact_tell::TellRequest { model: model.clone(), persona, reading, instruction, think };
             xact_mesut::tell_async(request, populating.clone(), budget)
@@ -165,10 +190,9 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
                 .map_err(submission_failed)
         }
         ExecutionPlan::Team { roster, persona, reading, populating, think, instruction } => {
-            let request = xact_team::TeamRequest::from_roster(
-                &roster, persona, reading, populating, instruction, think,
-            )
-            .map_err(|err| ExecutionOutcome::Failed { message: err.to_string() })?;
+            let request =
+                xact_team::TeamRequest::from_roster(&roster, persona, reading, populating, instruction, think)
+                    .map_err(|err| ExecutionOutcome::Failed { message: err.to_string() })?;
             xact_mesut::team_async(request, budget)
                 .map(|task| Pending(PendingKind::Team { task }))
                 .map_err(submission_failed)
@@ -180,33 +204,14 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
 pub struct Pending(PendingKind);
 
 enum PendingKind {
-    Bank {
-        task: xact_mesut::PendingTask<PathBuf>,
-    },
-    View {
-        path: PathBuf,
-        tool: &'static str,
-        task: xact_mesut::PendingTask<()>,
-    },
-    Run {
-        command_line: String,
-        task: xact_mesut::PendingTask<xact_mesut::ProcessOutcome>,
-    },
-    Bound {
-        source: PathBuf,
-        destination: Option<PathBuf>,
-        task: xact_mesut::PendingTask<()>,
-    },
+    Bank { task: xact_mesut::PendingTask<PathBuf> },
+    View { path: PathBuf, tool: &'static str, task: xact_mesut::PendingTask<()> },
+    Run { command_line: String, task: xact_mesut::PendingTask<xact_mesut::ProcessOutcome> },
+    Bound { source: PathBuf, destination: Option<PathBuf>, task: xact_mesut::PendingTask<()> },
     Copy { source: PathBuf, destination: PathBuf, task: xact_mesut::PendingTask<()> },
     Move { source: PathBuf, destination: PathBuf, task: xact_mesut::PendingTask<()> },
-    Agent {
-        model: String,
-        populated: Option<PathBuf>,
-        task: xact_mesut::PendingTask<String>,
-    },
-    Team {
-        task: xact_mesut::PendingTask<xact_team::TeamResult>,
-    },
+    Agent { model: String, populated: Option<PathBuf>, task: xact_mesut::PendingTask<String> },
+    Team { task: xact_mesut::PendingTask<xact_team::TeamResult> },
 }
 
 impl Pending {
@@ -217,7 +222,9 @@ impl Pending {
             PendingKind::View { path, tool, task } => view_outcome(path, tool, task.join()),
             PendingKind::Run { command_line, task } => run_outcome(command_line, task.join()),
             PendingKind::Bound { source, destination, task } => bound_outcome(source, destination, task.join()),
-            PendingKind::Copy { source, destination, task } => transfer_outcome(source, destination, false, task.join()),
+            PendingKind::Copy { source, destination, task } => {
+                transfer_outcome(source, destination, false, task.join())
+            }
             PendingKind::Move { source, destination, task } => transfer_outcome(source, destination, true, task.join()),
             PendingKind::Agent { model, populated, task } => told_outcome(model, populated, task.join()),
             PendingKind::Team { task } => team_outcome(task.join()),
@@ -237,8 +244,12 @@ impl Pending {
             PendingKind::Bound { source, destination, task } => {
                 task.try_join().map(|result| bound_outcome(source.clone(), destination.clone(), result))
             }
-            PendingKind::Copy { source, destination, task } => task.try_join().map(|result| transfer_outcome(source.clone(), destination.clone(), false, result)),
-            PendingKind::Move { source, destination, task } => task.try_join().map(|result| transfer_outcome(source.clone(), destination.clone(), true, result)),
+            PendingKind::Copy { source, destination, task } => {
+                task.try_join().map(|result| transfer_outcome(source.clone(), destination.clone(), false, result))
+            }
+            PendingKind::Move { source, destination, task } => {
+                task.try_join().map(|result| transfer_outcome(source.clone(), destination.clone(), true, result))
+            }
             PendingKind::Agent { model, populated, task } => {
                 task.try_join().map(|result| told_outcome(model.clone(), populated.clone(), result))
             }
@@ -280,7 +291,12 @@ fn bound_outcome(
     }
 }
 
-fn transfer_outcome(source: PathBuf, destination: PathBuf, moved: bool, result: Result<(), xact_mesut::AdapterError>) -> ExecutionOutcome {
+fn transfer_outcome(
+    source: PathBuf,
+    destination: PathBuf,
+    moved: bool,
+    result: Result<(), xact_mesut::AdapterError>,
+) -> ExecutionOutcome {
     match result {
         Ok(()) if moved => ExecutionOutcome::Moved { source, destination },
         Ok(()) => ExecutionOutcome::Copied { source, destination },
@@ -310,11 +326,7 @@ fn team_outcome(result: Result<xact_team::TeamResult, xact_mesut::AdapterError>)
     }
 }
 
-fn view_outcome(
-    path: PathBuf,
-    tool: &'static str,
-    result: Result<(), xact_mesut::AdapterError>,
-) -> ExecutionOutcome {
+fn view_outcome(path: PathBuf, tool: &'static str, result: Result<(), xact_mesut::AdapterError>) -> ExecutionOutcome {
     match result {
         Ok(()) => ExecutionOutcome::Viewed { path, tool },
         Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
@@ -341,7 +353,6 @@ mod tests {
     use super::*;
 
     #[test]
-
     #[ignore = "live: requires bank"]
     fn bank_plan_actually_creates_the_path() {
         let dir = std::env::temp_dir().join(format!("xact-executor-test-{}", std::process::id()));
@@ -357,20 +368,10 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires gls"]
     fn view_directory_plan_runs_gls() {
-        let outcome = execute(
-            ExecutionPlan::ViewDirectory { path: std::env::temp_dir() },
-            ResourceBudget::default(),
-        );
-        assert_eq!(
-            outcome,
-            ExecutionOutcome::Viewed {
-                path: std::env::temp_dir(),
-                tool: "gls"
-            }
-        );
+        let outcome = execute(ExecutionPlan::ViewDirectory { path: std::env::temp_dir() }, ResourceBudget::default());
+        assert_eq!(outcome, ExecutionOutcome::Viewed { path: std::env::temp_dir(), tool: "gls" });
     }
 
     #[test]
@@ -381,12 +382,7 @@ mod tests {
         );
         assert_eq!(
             outcome,
-            ExecutionOutcome::RunCompleted {
-                command_line: "true".into(),
-                success: true,
-                code: Some(0),
-                signal: None,
-            }
+            ExecutionOutcome::RunCompleted { command_line: "true".into(), success: true, code: Some(0), signal: None }
         );
     }
 
@@ -410,18 +406,21 @@ mod tests {
     #[test]
     fn run_plan_reports_missing_binary_as_failed() {
         let outcome = execute(
-            ExecutionPlan::Run { command_line: "xact-definitely-not-a-real-binary".into(), domain: xact_ast::OwnershipKind::My },
+            ExecutionPlan::Run {
+                command_line: "xact-definitely-not-a-real-binary".into(),
+                domain: xact_ast::OwnershipKind::My,
+            },
             ResourceBudget::default(),
         );
         assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
     }
 
     #[test]
-
     #[ignore = "live: requires cgroup v2 delegation"]
     fn run_plan_under_a_resource_budget_is_still_constrained_for_real() {
         let budget = ResourceBudget { cpu_percent: Some(50), ..Default::default() };
-        let outcome = execute(ExecutionPlan::Run { command_line: "true".into(), domain: xact_ast::OwnershipKind::My }, budget);
+        let outcome =
+            execute(ExecutionPlan::Run { command_line: "true".into(), domain: xact_ast::OwnershipKind::My }, budget);
         assert_eq!(
             outcome,
             ExecutionOutcome::RunCompleted { command_line: "true".into(), success: true, code: Some(0), signal: None }
@@ -431,12 +430,12 @@ mod tests {
     #[test]
     fn run_plan_fails_before_launching_for_an_unenforceable_resource() {
         let budget = ResourceBudget { unenforceable: vec!["GPU".into()], ..Default::default() };
-        let outcome = execute(ExecutionPlan::Run { command_line: "true".into(), domain: xact_ast::OwnershipKind::My }, budget);
+        let outcome =
+            execute(ExecutionPlan::Run { command_line: "true".into(), domain: xact_ast::OwnershipKind::My }, budget);
         assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
     }
 
     #[test]
-
     #[ignore = "live: requires bound"]
     fn bound_plan_actually_aggregates_a_real_directory() {
         let dir = std::env::temp_dir().join(format!("xact-executor-bound-test-{}", std::process::id()));
@@ -457,7 +456,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires bound"]
     fn concurrent_bound_plan_reports_via_try_join() {
         let dir = std::env::temp_dir().join(format!("xact-executor-bound-concurrent-test-{}", std::process::id()));
@@ -491,8 +489,11 @@ mod tests {
 
         let branches: Vec<Pending> = (0..3)
             .map(|_| {
-                execute_concurrent(ExecutionPlan::Run { command_line: "sleep 1".into(), domain: xact_ast::OwnershipKind::My }, ResourceBudget::default())
-                    .unwrap_or_else(|outcome| panic!("submission should be admitted: {outcome:?}"))
+                execute_concurrent(
+                    ExecutionPlan::Run { command_line: "sleep 1".into(), domain: xact_ast::OwnershipKind::My },
+                    ResourceBudget::default(),
+                )
+                .unwrap_or_else(|outcome| panic!("submission should be admitted: {outcome:?}"))
             })
             .collect();
 
@@ -516,7 +517,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires bank"]
     fn concurrent_bank_plan_reports_via_try_join() {
         let dir = std::env::temp_dir().join(format!("xact-executor-concurrent-test-{}", std::process::id()));
@@ -567,10 +567,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("response.txt");
 
-        let outcome = execute(
-            agent_plan("Reply with exactly one word: hello", Some(out.clone())),
-            ResourceBudget::default(),
-        );
+        let outcome =
+            execute(agent_plan("Reply with exactly one word: hello", Some(out.clone())), ResourceBudget::default());
 
         match outcome {
             ExecutionOutcome::Told { model, response, populated } => {

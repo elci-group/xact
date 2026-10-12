@@ -42,26 +42,17 @@ pub fn tokenize(input: &str) -> Vec<Token> {
             '£' => {
                 chars.next();
                 let end = chars.peek().map(|&(i, _)| i).unwrap_or(len);
-                tokens.push(Token {
-                    kind: TokenKind::Pound,
-                    span: Span::new(start, end),
-                });
+                tokens.push(Token { kind: TokenKind::Pound, span: Span::new(start, end) });
             }
             '!' => {
                 chars.next();
                 let end = chars.peek().map(|&(i, _)| i).unwrap_or(len);
-                tokens.push(Token {
-                    kind: TokenKind::Bang,
-                    span: Span::new(start, end),
-                });
+                tokens.push(Token { kind: TokenKind::Bang, span: Span::new(start, end) });
             }
             '@' => {
                 chars.next();
                 let end = chars.peek().map(|&(i, _)| i).unwrap_or(len);
-                tokens.push(Token {
-                    kind: TokenKind::At,
-                    span: Span::new(start, end),
-                });
+                tokens.push(Token { kind: TokenKind::At, span: Span::new(start, end) });
             }
             '\'' | '"' => {
                 let quote = ch;
@@ -108,10 +99,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         }
     }
 
-    tokens.push(Token {
-        kind: TokenKind::Eof,
-        span: Span::new(len, len),
-    });
+    tokens.push(Token { kind: TokenKind::Eof, span: Span::new(len, len) });
     tokens
 }
 

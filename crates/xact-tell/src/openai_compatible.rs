@@ -23,8 +23,10 @@ pub fn models(base_url: &str, api_key_env: &str) -> Vec<String> {
     let Ok(key) = std::env::var(api_key_env) else {
         return Vec::new();
     };
-    let Ok(response) =
-        ureq::get(&format!("{base_url}/models")).set("Authorization", &format!("Bearer {key}")).timeout(REQUEST_TIMEOUT).call()
+    let Ok(response) = ureq::get(&format!("{base_url}/models"))
+        .set("Authorization", &format!("Bearer {key}"))
+        .timeout(REQUEST_TIMEOUT)
+        .call()
     else {
         return Vec::new();
     };

@@ -27,21 +27,14 @@ impl std::error::Error for BankError {}
 /// Runs `bank -p <path>`, establishing the filesystem object at `path`
 /// (a file or a directory — `bank` decides which from the path shape).
 pub fn establish(path: &Path) -> Result<PathBuf, BankError> {
-    let output = Command::new("bank")
-        .arg("-p")
-        .arg(path)
-        .output()
-        .map_err(|e| BankError(format!("failed to run bank: {e}")))?;
+    let output =
+        Command::new("bank").arg("-p").arg(path).output().map_err(|e| BankError(format!("failed to run bank: {e}")))?;
 
     if output.status.success() {
         Ok(path.to_path_buf())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(BankError(format!(
-            "bank exited with {}: {}",
-            output.status,
-            stderr.trim()
-        )))
+        Err(BankError(format!("bank exited with {}: {}", output.status, stderr.trim())))
     }
 }
 
@@ -50,7 +43,6 @@ mod tests {
     use super::*;
 
     #[test]
-
     #[ignore = "live: requires bank"]
     fn establishes_a_file_with_missing_parents() {
         let dir = std::env::temp_dir().join(format!("xact-bank-test-{}", std::process::id()));
@@ -66,7 +58,6 @@ mod tests {
     }
 
     #[test]
-
     #[ignore = "live: requires bank"]
     fn establishes_a_directory_from_trailing_slash() {
         let dir = std::env::temp_dir().join(format!("xact-bank-test-dir-{}", std::process::id()));

@@ -11,8 +11,9 @@
 //! report "not supported yet".
 
 use xact_ast::{
-    AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Command, IdentityDeclaration, ImperativeCommand, Line, Operand,
-    OwnershipKind, PolicyArgKind, PolicyArgs, PolicyOperator, PolicyStatement, ReferenceKind, ResourceQuota, Span, Verb,
+    AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Command, IdentityDeclaration, ImperativeCommand, Line,
+    Operand, OwnershipKind, PolicyArgKind, PolicyArgs, PolicyOperator, PolicyStatement, ReferenceKind, ResourceQuota,
+    Span, Verb,
 };
 use xact_diagnostics::Diagnostic;
 use xact_lexer::{tokenize, Token, TokenKind};
@@ -89,11 +90,15 @@ pub fn parse_tokens(tokens: &[Token]) -> ParseOutcome {
 fn parse_after_pound(tokens: &[Token], idx: usize) -> ParseOutcome {
     let tok = &tokens[idx];
     match &tok.kind {
-        TokenKind::Eof => Diagnostic::incomplete("£ requires a command.", tok.span, top_level_expected()).into_incomplete(),
+        TokenKind::Eof => {
+            Diagnostic::incomplete("£ requires a command.", tok.span, top_level_expected()).into_incomplete()
+        }
         TokenKind::Word(w) if w.eq_ignore_ascii_case("THEY") => parse_identity(tokens, idx, tok.span),
-        TokenKind::Word(w) => match Verb::from_str(&w.to_uppercase()) {
+        TokenKind::Word(w) => match Verb::parse(&w.to_uppercase()) {
             Some(verb) => parse_imperative(tokens, idx + 1, verb, tok.span),
-            None => Diagnostic::invalid(format!("Unknown command '{w}'."), tok.span, top_level_expected()).into_invalid(),
+            None => {
+                Diagnostic::invalid(format!("Unknown command '{w}'."), tok.span, top_level_expected()).into_invalid()
+            }
         },
         TokenKind::StringLit(_) => {
             Diagnostic::invalid("Expected a command after £.", tok.span, top_level_expected()).into_invalid()
@@ -128,14 +133,15 @@ fn parse_identity(tokens: &[Token], they_idx: usize, they_span: Span) -> ParseOu
                         return Diagnostic::invalid("Unexpected input after identity declaration.", after.span, vec![])
                             .into_invalid();
                     }
-                    let members: Vec<String> = s
-                        .split(',')
-                        .map(|m| m.trim().to_string())
-                        .filter(|m| !m.is_empty())
-                        .collect();
+                    let members: Vec<String> =
+                        s.split(',').map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
                     if members.is_empty() {
-                        return Diagnostic::invalid("Identity declaration requires at least one member.", list_tok.span, vec![])
-                            .into_invalid();
+                        return Diagnostic::invalid(
+                            "Identity declaration requires at least one member.",
+                            list_tok.span,
+                            vec![],
+                        )
+                        .into_invalid();
                     }
                     ParseOutcome::Complete(Line::Command(Command::Identity(IdentityDeclaration {
                         members,
@@ -170,13 +176,7 @@ fn parse_imperative(tokens: &[Token], idx: usize, verb: Verb, verb_span: Span) -
     parse_after_operand(tokens, next_idx, verb, verb_span, operand)
 }
 
-fn parse_after_operand(
-    tokens: &[Token],
-    idx: usize,
-    verb: Verb,
-    verb_span: Span,
-    operand: Operand,
-) -> ParseOutcome {
+fn parse_after_operand(tokens: &[Token], idx: usize, verb: Verb, verb_span: Span, operand: Operand) -> ParseOutcome {
     let tok = &tokens[idx];
     match &tok.kind {
         TokenKind::Eof => ParseOutcome::Complete(Line::Command(Command::Imperative(ImperativeCommand {
@@ -252,7 +252,7 @@ fn finish_with_dependency(
             return Diagnostic::incomplete("WHEN requires THIS or THAT.", ref_tok.span, dependency_reference_expected())
                 .into_incomplete()
         }
-        TokenKind::Word(w) => match ReferenceKind::from_str(&w.to_uppercase()) {
+        TokenKind::Word(w) => match ReferenceKind::parse(&w.to_uppercase()) {
             Some(kind) => (kind, ref_tok.span),
             None => {
                 return Diagnostic::invalid(
@@ -280,7 +280,7 @@ fn finish_with_dependency(
             )
             .into_incomplete()
         }
-        TokenKind::Word(w) => match xact_ast::SuccessCondition::from_str(&w.to_uppercase()) {
+        TokenKind::Word(w) => match xact_ast::SuccessCondition::parse(&w.to_uppercase()) {
             Some(condition) => (condition, cond_tok.span),
             None => {
                 return Diagnostic::invalid(
@@ -318,18 +318,20 @@ fn finish_with_dependency(
 /// Parses one operand (an ownership+path pair, a `THIS`/`THAT` reference, or
 /// a string literal) starting at `idx`. `context` names what is requiring
 /// the operand, for diagnostic messages.
+// The error *is* the finished parse outcome (an `Incomplete`/`Invalid`
+// diagnostic) the caller returns verbatim; it is built once per line, so
+// boxing it would buy nothing.
+#[allow(clippy::result_large_err)]
 fn parse_operand(tokens: &[Token], idx: usize, context: &str) -> Result<(Operand, usize), ParseOutcome> {
     let tok = &tokens[idx];
     match &tok.kind {
-        TokenKind::Eof => Err(Diagnostic::incomplete(
-            format!("{context} requires a target."),
-            tok.span,
-            operand_expected(),
-        )
-        .into_incomplete()),
+        TokenKind::Eof => {
+            Err(Diagnostic::incomplete(format!("{context} requires a target."), tok.span, operand_expected())
+                .into_incomplete())
+        }
         TokenKind::Word(w) => {
             let upper = w.to_uppercase();
-            if let Some(kind) = OwnershipKind::from_str(&upper) {
+            if let Some(kind) = OwnershipKind::parse(&upper) {
                 let path_idx = idx + 1;
                 let path_tok = &tokens[path_idx];
                 match &path_tok.kind {
@@ -340,19 +342,11 @@ fn parse_operand(tokens: &[Token], idx: usize, context: &str) -> Result<(Operand
                     )
                     .into_incomplete()),
                     TokenKind::Word(p) => Ok((
-                        Operand::Owned {
-                            kind,
-                            path: p.clone(),
-                            span: Span::new(tok.span.start, path_tok.span.end),
-                        },
+                        Operand::Owned { kind, path: p.clone(), span: Span::new(tok.span.start, path_tok.span.end) },
                         path_idx + 1,
                     )),
                     TokenKind::StringLit(p) => Ok((
-                        Operand::Owned {
-                            kind,
-                            path: p.clone(),
-                            span: Span::new(tok.span.start, path_tok.span.end),
-                        },
+                        Operand::Owned { kind, path: p.clone(), span: Span::new(tok.span.start, path_tok.span.end) },
                         path_idx + 1,
                     )),
                     _ => Err(Diagnostic::invalid(
@@ -362,7 +356,7 @@ fn parse_operand(tokens: &[Token], idx: usize, context: &str) -> Result<(Operand
                     )
                     .into_invalid()),
                 }
-            } else if let Some(kind) = ReferenceKind::from_str(&upper) {
+            } else if let Some(kind) = ReferenceKind::parse(&upper) {
                 Ok((Operand::Reference { kind, span: tok.span }, idx + 1))
             } else {
                 Err(Diagnostic::invalid(
@@ -373,29 +367,20 @@ fn parse_operand(tokens: &[Token], idx: usize, context: &str) -> Result<(Operand
                 .into_invalid())
             }
         }
-        TokenKind::StringLit(s) => Ok((
-            Operand::StringArg {
-                value: s.clone(),
-                span: tok.span,
-            },
-            idx + 1,
-        )),
-        TokenKind::Bang | TokenKind::At | TokenKind::Pound => Err(Diagnostic::invalid(
-            format!("{context} requires a target."),
-            tok.span,
-            operand_expected(),
-        )
-        .into_invalid()),
+        TokenKind::StringLit(s) => Ok((Operand::StringArg { value: s.clone(), span: tok.span }, idx + 1)),
+        TokenKind::Bang | TokenKind::At | TokenKind::Pound => {
+            Err(Diagnostic::invalid(format!("{context} requires a target."), tok.span, operand_expected())
+                .into_invalid())
+        }
     }
 }
 
 fn parse_policy(tokens: &[Token], idx: usize) -> ParseOutcome {
     let tok = &tokens[idx];
     match &tok.kind {
-        TokenKind::Eof => {
-            Diagnostic::incomplete("! requires a policy operator.", tok.span, policy_operator_expected()).into_incomplete()
-        }
-        TokenKind::Word(w) => match PolicyOperator::from_str(&w.to_uppercase()) {
+        TokenKind::Eof => Diagnostic::incomplete("! requires a policy operator.", tok.span, policy_operator_expected())
+            .into_incomplete(),
+        TokenKind::Word(w) => match PolicyOperator::parse(&w.to_uppercase()) {
             Some(op) => parse_policy_args(tokens, idx + 1, op, tok.span),
             None => {
                 Diagnostic::invalid(format!("Unknown policy operator '{w}'."), tok.span, policy_operator_expected())
@@ -445,7 +430,8 @@ fn parse_policy_args(tokens: &[Token], idx: usize, op: PolicyOperator, op_span: 
             };
             let after = &tokens[idx + 1];
             if !matches!(after.kind, TokenKind::Eof) {
-                return Diagnostic::invalid("Unexpected input after policy capability.", after.span, vec![]).into_invalid();
+                return Diagnostic::invalid("Unexpected input after policy capability.", after.span, vec![])
+                    .into_invalid();
             }
             ParseOutcome::Complete(Line::Policy(PolicyStatement {
                 operator: op,
@@ -477,7 +463,8 @@ fn parse_policy_args(tokens: &[Token], idx: usize, op: PolicyOperator, op_span: 
             };
             let after = &tokens[idx + 1];
             if !matches!(after.kind, TokenKind::Eof) {
-                return Diagnostic::invalid("Unexpected input after policy condition.", after.span, vec![]).into_invalid();
+                return Diagnostic::invalid("Unexpected input after policy condition.", after.span, vec![])
+                    .into_invalid();
             }
             ParseOutcome::Complete(Line::Policy(PolicyStatement {
                 operator: op,
@@ -540,11 +527,7 @@ fn parse_quota(word: &str, span: Span) -> Result<ResourceQuota, String> {
     if resource.is_empty() {
         return Err(format!("'{word}' is missing a resource name (expected e.g. 20%RAM)."));
     }
-    Ok(ResourceQuota {
-        percent,
-        resource: resource.to_uppercase(),
-        span,
-    })
+    Ok(ResourceQuota { percent, resource: resource.to_uppercase(), span })
 }
 
 fn parse_agent(tokens: &[Token], idx: usize) -> ParseOutcome {
@@ -553,11 +536,10 @@ fn parse_agent(tokens: &[Token], idx: usize) -> ParseOutcome {
         TokenKind::Eof => {
             Diagnostic::incomplete("@ requires TELL or TEAM.", tok.span, agent_verb_expected()).into_incomplete()
         }
-        TokenKind::Word(w) => match AgentVerb::from_str(&w.to_uppercase()) {
+        TokenKind::Word(w) => match AgentVerb::parse(&w.to_uppercase()) {
             Some(verb) => parse_agent_target(tokens, idx + 1, verb, tok.span),
-            None => {
-                Diagnostic::invalid(format!("Unknown agent verb '{w}'."), tok.span, agent_verb_expected()).into_invalid()
-            }
+            None => Diagnostic::invalid(format!("Unknown agent verb '{w}'."), tok.span, agent_verb_expected())
+                .into_invalid(),
         },
         _ => Diagnostic::invalid("Expected TELL or TEAM after @.", tok.span, agent_verb_expected()).into_invalid(),
     }
@@ -611,8 +593,12 @@ fn parse_agent_clauses(
             TokenKind::StringLit(s) => {
                 let after = &tokens[idx + 1];
                 if !matches!(after.kind, TokenKind::Eof) {
-                    return Diagnostic::invalid("Unexpected input after the @ block's instruction.", after.span, vec![])
-                        .into_invalid();
+                    return Diagnostic::invalid(
+                        "Unexpected input after the @ block's instruction.",
+                        after.span,
+                        vec![],
+                    )
+                    .into_invalid();
                 }
                 return ParseOutcome::Complete(Line::Agent(AgentBlock {
                     verb,
@@ -625,7 +611,7 @@ fn parse_agent_clauses(
                 }));
             }
             TokenKind::Word(w) => {
-                let Some(kind) = AgentClauseKind::from_str(&w.to_uppercase()) else {
+                let Some(kind) = AgentClauseKind::parse(&w.to_uppercase()) else {
                     return Diagnostic::invalid(
                         format!("Unknown clause '{w}'."),
                         tok.span,
@@ -660,6 +646,10 @@ fn parse_agent_clauses(
     }
 }
 
+// The error *is* the finished parse outcome (an `Incomplete`/`Invalid`
+// diagnostic) the caller returns verbatim; it is built once per line, so
+// boxing it would buy nothing.
+#[allow(clippy::result_large_err)]
 fn parse_agent_clause_arg(
     tokens: &[Token],
     idx: usize,
@@ -670,30 +660,20 @@ fn parse_agent_clause_arg(
         AgentClauseKind::Be => {
             let tok = &tokens[idx];
             match &tok.kind {
-                TokenKind::Eof => Err(Diagnostic::incomplete(
-                    "BE requires a persona description.",
-                    tok.span,
-                    vec!["'...'".into()],
-                )
-                .into_incomplete()),
+                TokenKind::Eof => {
+                    Err(Diagnostic::incomplete("BE requires a persona description.", tok.span, vec!["'...'".into()])
+                        .into_incomplete())
+                }
                 TokenKind::Word(w) => Ok((
-                    AgentClause::Be {
-                        persona: w.clone(),
-                        span: Span::new(kind_span.start, tok.span.end),
-                    },
+                    AgentClause::Be { persona: w.clone(), span: Span::new(kind_span.start, tok.span.end) },
                     idx + 1,
                 )),
                 TokenKind::StringLit(s) => Ok((
-                    AgentClause::Be {
-                        persona: s.clone(),
-                        span: Span::new(kind_span.start, tok.span.end),
-                    },
+                    AgentClause::Be { persona: s.clone(), span: Span::new(kind_span.start, tok.span.end) },
                     idx + 1,
                 )),
-                _ => Err(
-                    Diagnostic::invalid("BE requires a persona description.", tok.span, vec!["'...'".into()])
-                        .into_invalid(),
-                ),
+                _ => Err(Diagnostic::invalid("BE requires a persona description.", tok.span, vec!["'...'".into()])
+                    .into_invalid()),
             }
         }
         AgentClauseKind::Reading | AgentClauseKind::Populating => {
@@ -716,13 +696,9 @@ fn parse_agent_clause_arg(
                 )
                 .into_incomplete()),
                 TokenKind::Word(w) => match w.parse::<u32>() {
-                    Ok(budget) => Ok((
-                        AgentClause::Think {
-                            budget,
-                            span: Span::new(kind_span.start, tok.span.end),
-                        },
-                        idx + 1,
-                    )),
+                    Ok(budget) => {
+                        Ok((AgentClause::Think { budget, span: Span::new(kind_span.start, tok.span.end) }, idx + 1))
+                    }
                     Err(_) => Err(Diagnostic::invalid(
                         format!("'{w}' is not a valid THINK budget (expected a number)."),
                         tok.span,

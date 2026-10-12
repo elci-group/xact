@@ -73,11 +73,7 @@ mod tests {
         let identity = IdentityContext::new();
         let references = ReferenceContext::new();
         let block = block_with_clauses(vec![AgentClause::Reading {
-            operand: Operand::Owned {
-                kind: OwnershipKind::Their,
-                path: "~/shared".into(),
-                span: Span::default(),
-            },
+            operand: Operand::Owned { kind: OwnershipKind::Their, path: "~/shared".into(), span: Span::default() },
             span: Span::default(),
         }]);
         assert!(validate(block, &identity, &references).is_err());
@@ -89,10 +85,7 @@ mod tests {
         let mut references = ReferenceContext::new();
         references.record(xact_reference::ResolvedObject::Path("~/project/review".into()));
         let block = block_with_clauses(vec![AgentClause::Populating {
-            operand: Operand::Reference {
-                kind: ReferenceKind::That,
-                span: Span::default(),
-            },
+            operand: Operand::Reference { kind: ReferenceKind::That, span: Span::default() },
             span: Span::default(),
         }]);
         assert!(validate(block, &identity, &references).is_ok());
@@ -103,10 +96,7 @@ mod tests {
         let identity = IdentityContext::new();
         let references = ReferenceContext::new();
         let block = block_with_clauses(vec![AgentClause::Populating {
-            operand: Operand::Reference {
-                kind: ReferenceKind::That,
-                span: Span::default(),
-            },
+            operand: Operand::Reference { kind: ReferenceKind::That, span: Span::default() },
             span: Span::default(),
         }]);
         assert!(validate(block, &identity, &references).is_err());
