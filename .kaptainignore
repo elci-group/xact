@@ -1,0 +1,10 @@
+# Common
+.git
+.kaptaind
+.claude
+.DS_Store
+*.swp
+*.swo
+
+# Rust
+target

@@ -10,3 +10,4 @@ xact-mesut = { workspace = true }
 xact-ast = { workspace = true }
 xact-tell = { workspace = true }
 xact-team = { workspace = true }
+xact-oip = { workspace = true }

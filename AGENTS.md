@@ -697,6 +697,9 @@ Examples:
 CREATE
     → bank
 
+EDIT
+    → oip   (replace a file's content with the clipboard; see docs/adr/0001-edit-via-oip.md)
+
 BOUND
     → bound / bound-core
 

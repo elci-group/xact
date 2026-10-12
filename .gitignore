@@ -3,3 +3,7 @@
 # lwoodz run artifacts (audit log, SPDX manifest cache) — regenerated per
 # analysis run, not source. lwoodz.toml itself is tracked.
 /.lwoodz/
+
+# kaptaind working state and local Claude Code state
+/.kaptaind/
+/.claude/

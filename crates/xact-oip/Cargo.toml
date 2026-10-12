@@ -1,0 +1,14 @@
+[package]
+name = "xact-oip"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+xact-ast = { workspace = true }
+xact-resource = { workspace = true }
+xact-cancel = { workspace = true }
+
+[dev-dependencies]
+# Live tests only: puts real text on the desktop clipboard for `oip` to read.
+arboard = "3.6"

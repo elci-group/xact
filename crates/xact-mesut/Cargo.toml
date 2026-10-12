@@ -10,6 +10,7 @@ mesut-observe = { workspace = true }
 xact-ast = { workspace = true }
 xact-process = { workspace = true }
 xact-bank = { workspace = true }
+xact-oip = { workspace = true }
 xact-see = { workspace = true }
 xact-bound = { workspace = true }
 xact-tell = { workspace = true }

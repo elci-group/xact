@@ -8,3 +8,4 @@ license.workspace = true
 xact-ast = { workspace = true }
 xact-reference = { workspace = true }
 xact-resolve = { workspace = true }
+xact-oip = { workspace = true }

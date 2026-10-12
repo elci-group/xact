@@ -420,6 +420,8 @@ These are product decisions that this directive deliberately does not make. Each
 
 **Resolved by the owner, 2026-10-12:** D-1 → a block is the unit of all-or-nothing validation (a REPL submission, or a whole `-c` string, script file, or piped input); policies, identity and references stay session-wide. D-2 → `THAT` is the last command's result (destination, else target) and `THIS` its input (source). D-3 → `OUR` paths resolve under the shared root `XACT_OUR_ROOT` and are refused when it is unset; `THEIR` paths resolve under the declared user's real home. Agent default → network-backed agents stay allowed by default, and `! WITHOUT network`/`agent-remote`/`agent-tools` refuse them.
 
+**Resolved by the owner, 2026-10-12 (later):** D-5, for `EDIT` only → `EDIT` is executed by the ELci tool `oip` ([ADR 0001](docs/adr/0001-edit-via-oip.md)). COPY, MOVE, DELETE and the clipboard verbs remain open. Repository topology (M1.2) → `/home/sal/xact` is its own repository on `elci-group/xact`, released through kaptaind.
+
 ---
 
 ## 9. Governance
@@ -470,3 +472,19 @@ This document carries a **status log** (below), maintained the way MESUT's phase
 > Evidence: hermetic tier 233 passed / 0 failed / 31 ignored with `PATH=/usr/bin:/bin`. Live tier 261 passed / 0 failed, with the two Ollama-generation tests run separately (`real_ollama_end_to_end_and_cancellation` passed in 135 s). Every user-visible behaviour above was verified through the real binary.
 >
 > **Still open:** M1.2 (repo split and push; owner action), M1.6–M1.7, typed resources (rest of M2.2), multi-target `THEIR` fan-out (M4.5, SPEC §5), M2.1, M2.4 (block-scoped policy, deliberately not adopted per D-1), M2.6–M2.8, M3.1, M3.4, M3.6 (aggregate caps, multi-core), and M4–M7. Network isolation of completion's own `gls` listings is out of scope (they are not executions). Next action: owner pushes; then **M2.1** (typed execution IR).
+>
+> **2026-10-12 — Sprint S1 complete: `EDIT` via `oip`; M1.2 done; M4.1/M4.2 done for `EDIT`.** Plan of record: [`docs/sprints/S1-edit-via-oip.md`](docs/sprints/S1-edit-via-oip.md); decision record: [ADR 0001](docs/adr/0001-edit-via-oip.md).
+>
+> - **M1.2:** `/home/sal/xact` is now its own repository. `git subtree split --prefix=xact` reproduced GitHub's tip `3e94d9f` exactly, so the 5 local commits were carried over as a fast-forward and nothing was rewritten. The home repository untracks and ignores `/xact/`.
+> - **`EDIT` executes:** the new `xact-oip` crate owns the whole `oip` boundary. It always invokes `oip -- <absolute path>` and never `-i` or `--revert`. Before spawning, it refuses missing files (use `CREATE`), directories, symlinks, and paths containing `{`/`}` (which `oip` would brace-expand). The planner reuses the same check, so such targets plan as `Unsupported` with the fix named.
+> - **Policy:** `EDIT` requires `process-spawn`, `filesystem-write` and `clipboard`. `oip` runs under `SPEND`/`SAVE`, network isolation and CTRL-C cancellation like every other spawned tool.
+> - **Pipeline:** an `xact.edit` Mesut workload (sync and concurrent). `ExecutionOutcome::Edited` carries the backup path and `oip`'s preview, and the CLI renders both.
+> - **Verb count:** 7 of 10 verbs now execute.
+>
+> Evidence:
+>
+> - Hermetic tier: 240 passed / 0 failed / 33 ignored. Live tier: 270 passed / 0 failed. Both include stub-`oip` tests (argument shape, no spawn on refused targets, error mapping, budget refusal) and real-`oip`/real-clipboard tests, one of them inside the network-isolated namespace.
+> - Verified through the real binary: under `! WITHOUT network`, `£ SEE MY …/notes.md`, `£ EDIT THAT`, `£ RUN 'cat …' WHEN THAT SUCCEEDS` replaced the file from the clipboard and kept `notes.md.oip.backup`.
+> - Exit codes: 1 for a missing-file edit, 2 for `EDIT` under `! WITHOUT clipboard`.
+>
+> **Upstream follow-ups for `oip`** (ADR 0001): per-file revert, atomic write, a flag to disable brace expansion, version string alignment. **Next action:** M2.1 (typed execution IR).

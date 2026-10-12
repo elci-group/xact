@@ -21,7 +21,10 @@ grammar (no LLM involved in parsing, ownership resolution, or policy evaluation)
   `£ COPY MY ~/draft.md to MY ~/backup.md`, `£ MOVE MY ~/draft.md to MY ~/archive.md`,
   `£ RUN 'cargo build'`, `£ BOUND MY ~/project/ to MY ~/bundle.txt`. COPY handles ordinary
   files/directories recursively and never overwrites; MOVE is atomic and refuses cross-filesystem
-  fallbacks. Ownership and references are resolved and validated before anything
+  fallbacks. `£ EDIT MY ~/notes.md` replaces an existing file's content with the
+  clipboard text through `oip`, which keeps the previous content in
+  `notes.md.oip.backup` (see [ADR 0001](docs/adr/0001-edit-via-oip.md)). Ownership and
+  references are resolved and validated before anything
   runs: `~` means `$HOME` under `MY`, the shared root `$XACT_OUR_ROOT` under `OUR`
   (refused if unset), and the declared user's real home under `THEIR` (after
   `£ THEY are "alice"`). After a command, `THAT` is what it produced (its
@@ -50,7 +53,8 @@ grammar (no LLM involved in parsing, ownership resolution, or policy evaluation)
 
 Every accepted command is planned, then actually executed — `£ CREATE` really
 creates the file or directory via `bank`, `£ SEE` really renders it via `gls` or
-`bat`, `£ RUN` really spawns and waits on the process, `£ BOUND` really
+`bat`, `£ EDIT` really applies the clipboard via `oip`, `£ RUN` really spawns and
+waits on the process, `£ BOUND` really
 aggregates the source set via `bound`, and `@ TELL`/`@ TEAM` really call their
 configured model or roster. Nothing is simulated: a plan that can't be honestly
 executed is reported as unsupported rather than faked.
@@ -89,7 +93,7 @@ and recovery constructs beyond a plain `WHEN ... FAILS` fallback).
 Xact is a Cargo workspace of small, single-purpose crates. The language pipeline
 (lexer → parser → AST → semantic validation → policy → planner) is fully
 deterministic and covered by unit tests; execution adapters
-(`xact-bank`, `xact-see`, `xact-bound`, `xact-process`, `xact-tell`, `xact-team`) each wrap
+(`xact-bank`, `xact-see`, `xact-oip`, `xact-bound`, `xact-process`, `xact-tell`, `xact-team`) each wrap
 exactly one real external tool; `xact-mesut` is the single boundary crate that
 talks to Mesut; `xact-cli` is the interactive REPL and script runner that ties it all
 together. [`XACT_COMPLETION_DIRECTIVE.md`](./XACT_COMPLETION_DIRECTIVE.md) is the
@@ -113,8 +117,8 @@ piped to `xact` each run as one block: every statement is validated first, and
 nothing runs unless all of them pass. The exit status is 0 when every command
 succeeded, 1 when one did not, and 2 when the block was rejected.
 
-Real `£ CREATE`/`£ SEE`/`£ BOUND`/`@ TELL`/`@ TEAM` execution requires `bank`, `gls`,
-`bat`, `bound`, and `ollama` (with at least one model pulled) to be installed
+Real `£ CREATE`/`£ SEE`/`£ EDIT`/`£ BOUND`/`@ TELL`/`@ TEAM` execution requires `bank`, `gls`,
+`bat`, `oip` (plus a desktop clipboard), `bound`, and `ollama` (with at least one model pulled) to be installed
 and reachable on `$PATH`. `! WITHOUT network` requires unprivileged user
 namespaces; where the host forbids them, isolated processes fail to start
 rather than run with network access.

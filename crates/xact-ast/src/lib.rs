@@ -361,7 +361,8 @@ pub enum Capability {
     /// `MOVE`, `BOUND ... to`, `POPULATING`, and `RUN`, whose writes Xact
     /// cannot confine).
     FilesystemWrite,
-    /// Writing to the desktop clipboard (`BOUND` with no destination).
+    /// Using the desktop clipboard: `BOUND` with no destination writes it,
+    /// `EDIT` reads it.
     Clipboard,
     /// A model served on this machine (Ollama).
     AgentLocal,

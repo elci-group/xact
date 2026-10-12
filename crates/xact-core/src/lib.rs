@@ -417,4 +417,16 @@ mod tests {
             other => panic!("expected acceptance, got {other:?}"),
         }
     }
+
+    #[test]
+    fn without_clipboard_rejects_edit_before_it_is_accepted() {
+        let mut session = Session::new();
+        assert!(matches!(session.submit("! WITHOUT clipboard"), SessionOutcome::PolicyAccepted(_)));
+        match session.submit("£ EDIT MY /tmp/xact-never-edited.txt") {
+            SessionOutcome::Rejected(diagnostics) => {
+                assert!(diagnostics[0].message.contains("WITHOUT clipboard"), "{diagnostics:?}")
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
 }

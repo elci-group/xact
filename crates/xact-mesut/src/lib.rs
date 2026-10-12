@@ -494,6 +494,21 @@ pub fn team_async(
     submit("xact.team", move || xact_team::execute(&request, &budget).map_err(|err| err.to_string()))
 }
 
+/// Edits `path` behind the Mesut adapter (`£ EDIT`'s execution path,
+/// ADR 0001), constrained by `budget`. `xact-oip` owns the `oip`
+/// invocation and its preconditions.
+pub fn edit_file(path: PathBuf, budget: xact_ast::ResourceBudget) -> Result<xact_oip::Edit, AdapterError> {
+    edit_file_async(path, budget)?.join()
+}
+
+/// Same as [`edit_file`], but returns immediately as an independent branch.
+pub fn edit_file_async(
+    path: PathBuf,
+    budget: xact_ast::ResourceBudget,
+) -> Result<PendingTask<xact_oip::Edit>, AdapterError> {
+    submit("xact.edit", move || xact_oip::edit(&path, &budget).map_err(|err| err.to_string()))
+}
+
 pub fn copy_path(source: PathBuf, destination: PathBuf) -> Result<(), AdapterError> {
     copy_path_async(source, destination)?.join()
 }

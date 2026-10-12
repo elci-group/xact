@@ -14,7 +14,8 @@
 //! `CREATE` → `bank`; `SEE` → `gls` (directories) or `bat` (files), chosen
 //! by inspecting the resolved path; `RUN` → native process execution;
 //! `BOUND` → `bound`; `COPY`/`MOVE` → Xact's narrow native transfer adapter
-//! (no ELci tool owns generic copy/move). `EDIT`, `PASTE`, `CUT`, `DELETE`,
+//! (no ELci tool owns generic copy/move); `EDIT` → `oip` (ADR 0001).
+//! `PASTE`, `CUT`, `DELETE`,
 //! and identity declarations are reported as [`PlanOutcome::Unsupported`]
 //! — not silently dropped.
 //!
@@ -69,6 +70,13 @@ pub enum ExecutionPlan {
     Run {
         command_line: String,
         domain: OwnershipKind,
+    },
+    /// `EDIT` -> the `oip` tool (ADR 0001): replace the file's content with
+    /// the clipboard text, keeping `<path>.oip.backup`. `path` has already
+    /// passed `xact_oip::check_target` (an existing regular file, not a
+    /// symlink, no brace characters).
+    Edit {
+        path: PathBuf,
     },
     /// `BOUND` -> the `bound` tool (spec sections 4, 12, 21). `destination`
     /// is `bound`'s own `--out` file; `None` means `bound`'s clipboard
@@ -205,6 +213,19 @@ pub fn plan(command: &Command, references: &ReferenceContext, roots: &OwnerRoots
                 _ => unreachable!(),
             }
         }
+        xact_ast::Verb::Edit => {
+            let Some(operand) = &cmd.operand else {
+                return PlanOutcome::Unsupported("EDIT requires a file to edit.".into());
+            };
+            let Some(raw) = resolve_path(operand, references) else {
+                return PlanOutcome::Unsupported("EDIT's target did not resolve to a path.".into());
+            };
+            let path = locate!(&raw, operand, roots);
+            match xact_oip::check_target(&path) {
+                Ok(()) => PlanOutcome::Plan(ExecutionPlan::Edit { path }),
+                Err(reason) => PlanOutcome::Unsupported(reason.to_string()),
+            }
+        }
         other => PlanOutcome::Unsupported(format!("{} has no execution plan yet.", other.as_str())),
     }
 }
@@ -316,7 +337,8 @@ pub fn required_capabilities(command: &Command) -> Vec<Capability> {
         Verb::Create | Verb::Run => vec![Capability::ProcessSpawn, Capability::FilesystemWrite],
         Verb::Bound if cmd.destination.is_some() => vec![Capability::ProcessSpawn, Capability::FilesystemWrite],
         Verb::Bound => vec![Capability::ProcessSpawn, Capability::Clipboard],
-        Verb::Copy | Verb::Move | Verb::Edit | Verb::Paste | Verb::Cut | Verb::Delete => {
+        Verb::Edit => vec![Capability::ProcessSpawn, Capability::FilesystemWrite, Capability::Clipboard],
+        Verb::Copy | Verb::Move | Verb::Paste | Verb::Cut | Verb::Delete => {
             vec![Capability::FilesystemWrite]
         }
     }
@@ -784,5 +806,49 @@ mod tests {
             dependency: None,
         });
         assert!(required_capabilities(&bound_to_clipboard).contains(&Capability::Clipboard));
+    }
+
+    fn edit_command(operand: Operand) -> Command {
+        Command::Imperative(ImperativeCommand {
+            verb: Verb::Edit,
+            verb_span: Span::default(),
+            operand: Some(operand),
+            destination: None,
+            dependency: None,
+        })
+    }
+
+    #[test]
+    fn edit_plans_an_existing_file_and_refuses_what_oip_must_not_touch() {
+        let dir = std::env::temp_dir().join(format!("xact-planner-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.md");
+        std::fs::write(&file, "x").unwrap();
+        let owned = |path: &std::path::Path| Operand::Owned {
+            kind: OwnershipKind::My,
+            path: path.to_string_lossy().into_owned(),
+            span: Span::default(),
+        };
+        let references = ReferenceContext::new();
+
+        match plan(&edit_command(owned(&file)), &references, &OwnerRoots::default()) {
+            PlanOutcome::Plan(ExecutionPlan::Edit { path }) => assert_eq!(path, file),
+            other => panic!("expected an edit plan, got {other:?}"),
+        }
+        for (target, expected) in [(dir.join("missing.md"), "CREATE"), (dir.clone(), "directory")] {
+            match plan(&edit_command(owned(&target)), &references, &OwnerRoots::default()) {
+                PlanOutcome::Unsupported(reason) => assert!(reason.contains(expected), "{reason}"),
+                other => panic!("expected unsupported for {target:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn edit_needs_the_clipboard() {
+        let cmd = edit_command(Operand::StringArg { value: "/tmp/x".into(), span: Span::default() });
+        assert_eq!(
+            required_capabilities(&cmd),
+            vec![Capability::ProcessSpawn, Capability::FilesystemWrite, Capability::Clipboard]
+        );
     }
 }

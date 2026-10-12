@@ -87,6 +87,14 @@ pub enum ExecutionOutcome {
         source: PathBuf,
         destination: Option<PathBuf>,
     },
+    /// The clipboard was applied to a file via `oip` (ADR 0001). `backup`
+    /// is where the previous content was saved; `preview` is `oip`'s own
+    /// before/after summary.
+    Edited {
+        path: PathBuf,
+        backup: Option<PathBuf>,
+        preview: Vec<String>,
+    },
     Copied {
         source: PathBuf,
         destination: PathBuf,
@@ -128,6 +136,7 @@ pub fn execute(plan: ExecutionPlan, budget: ResourceBudget) -> ExecutionOutcome 
         ExecutionPlan::Bound { source, destination } => {
             bound_outcome(source.clone(), destination.clone(), xact_mesut::bound_aggregate(source, destination, budget))
         }
+        ExecutionPlan::Edit { path } => edit_outcome(xact_mesut::edit_file(path, budget)),
         ExecutionPlan::Copy { source, destination } => {
             transfer_outcome(source.clone(), destination.clone(), false, xact_mesut::copy_path(source, destination))
         }
@@ -179,6 +188,9 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
                 .map(|task| Pending(PendingKind::Bound { source, destination, task }))
                 .map_err(submission_failed)
         }
+        ExecutionPlan::Edit { path } => xact_mesut::edit_file_async(path, budget)
+            .map(|task| Pending(PendingKind::Edit { task }))
+            .map_err(submission_failed),
         ExecutionPlan::Copy { source, destination } => xact_mesut::copy_path_async(source.clone(), destination.clone())
             .map(|task| Pending(PendingKind::Copy { source, destination, task }))
             .map_err(submission_failed),
@@ -210,6 +222,7 @@ enum PendingKind {
     View { path: PathBuf, tool: &'static str, task: xact_mesut::PendingTask<()> },
     Run { command_line: String, task: xact_mesut::PendingTask<xact_mesut::ProcessOutcome> },
     Bound { source: PathBuf, destination: Option<PathBuf>, task: xact_mesut::PendingTask<()> },
+    Edit { task: xact_mesut::PendingTask<xact_oip::Edit> },
     Copy { source: PathBuf, destination: PathBuf, task: xact_mesut::PendingTask<()> },
     Move { source: PathBuf, destination: PathBuf, task: xact_mesut::PendingTask<()> },
     Agent { model: String, populated: Option<PathBuf>, task: xact_mesut::PendingTask<String> },
@@ -224,6 +237,7 @@ impl Pending {
             PendingKind::View { path, tool, task } => view_outcome(path, tool, task.join()),
             PendingKind::Run { command_line, task } => run_outcome(command_line, task.join()),
             PendingKind::Bound { source, destination, task } => bound_outcome(source, destination, task.join()),
+            PendingKind::Edit { task } => edit_outcome(task.join()),
             PendingKind::Copy { source, destination, task } => {
                 transfer_outcome(source, destination, false, task.join())
             }
@@ -246,6 +260,7 @@ impl Pending {
             PendingKind::Bound { source, destination, task } => {
                 task.try_join().map(|result| bound_outcome(source.clone(), destination.clone(), result))
             }
+            PendingKind::Edit { task } => task.try_join().map(edit_outcome),
             PendingKind::Copy { source, destination, task } => {
                 task.try_join().map(|result| transfer_outcome(source.clone(), destination.clone(), false, result))
             }
@@ -268,10 +283,18 @@ impl Pending {
             PendingKind::View { task, .. } => task.drain_events(),
             PendingKind::Run { task, .. } => task.drain_events(),
             PendingKind::Bound { task, .. } => task.drain_events(),
+            PendingKind::Edit { task } => task.drain_events(),
             PendingKind::Copy { task, .. } | PendingKind::Move { task, .. } => task.drain_events(),
             PendingKind::Agent { task, .. } => task.drain_events(),
             PendingKind::Team { task } => task.drain_events(),
         }
+    }
+}
+
+fn edit_outcome(result: Result<xact_oip::Edit, xact_mesut::AdapterError>) -> ExecutionOutcome {
+    match result {
+        Ok(edit) => ExecutionOutcome::Edited { path: edit.path, backup: edit.backup, preview: edit.preview },
+        Err(err) => ExecutionOutcome::Failed { message: err.to_string() },
     }
 }
 

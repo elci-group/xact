@@ -4,9 +4,9 @@
 //! (`xact-core`), planned (`xact-planner`), and actually run
 //! (`xact-executor`): `£ CREATE` via `bank`, `£ SEE` via `gls`/`bat`,
 //! `£ RUN` as a real process, `£ BOUND` via `bound`, `£ COPY`/`£ MOVE`
-//! natively, and `@ TELL`/`@ TEAM` against real agent backends. `EDIT`,
-//! `PASTE`, `CUT`, and `DELETE` have no execution plan yet and report
-//! themselves unsupported rather than silently doing nothing.
+//! natively, `£ EDIT` via `oip` (ADR 0001), and `@ TELL`/`@ TEAM` against
+//! real agent backends. `PASTE`, `CUT`, and `DELETE` have no execution plan
+//! yet and report themselves unsupported rather than silently doing nothing.
 //! [`dispatch`] is the one place `£` and `@` paths funnel through.
 //!
 //! Scheduling (spec section 23, Xact–Mesut Integration Phase 3): with no
@@ -387,7 +387,7 @@ fn keyword_description(value: &str) -> Option<&'static str> {
         "!" => "Start a policy statement",
         "@" => "Start an agent block",
         "SEE" => "Show a file or directory (gls/bat)",
-        "EDIT" => "Open a resource for editing",
+        "EDIT" => "Replace a file's content with the clipboard (backup kept)",
         "MOVE" => "Move a resource to a destination",
         "COPY" => "Copy a resource to a destination",
         "PASTE" => "Paste a resource to a destination",
@@ -822,6 +822,7 @@ fn outcome_succeeded(outcome: &ExecutionOutcome) -> bool {
         ExecutionOutcome::BankEstablished { .. }
         | ExecutionOutcome::Viewed { .. }
         | ExecutionOutcome::Bounded { .. }
+        | ExecutionOutcome::Edited { .. }
         | ExecutionOutcome::Copied { .. }
         | ExecutionOutcome::Moved { .. }
         | ExecutionOutcome::Told { .. }
@@ -870,6 +871,17 @@ fn print_outcome(branch: Option<&str>, outcome: &ExecutionOutcome) {
             }
             None => println!("{prefix}bound: aggregated {} to the clipboard", source.display()),
         },
+        ExecutionOutcome::Edited { path, backup, preview } => {
+            for line in preview {
+                println!("{prefix}oip: {line}");
+            }
+            match backup {
+                Some(backup) => {
+                    println!("{prefix}edited {} (previous content saved to {})", path.display(), backup.display())
+                }
+                None => println!("{prefix}edited {} — oip reported success but left no backup", path.display()),
+            }
+        }
         ExecutionOutcome::Copied { source, destination } => {
             println!("{prefix}copied {} to {}", source.display(), destination.display())
         }
