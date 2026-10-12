@@ -33,6 +33,14 @@ xact-see = { path = "crates/xact-see" }
 xact-mesut = { path = "crates/xact-mesut" }
 xact-core = { path = "crates/xact-core" }
 
-mesut = { path = "../mesut/crates/mesut" }
-mesut-observe = { path = "../mesut/crates/mesut-observe" }
-padagonia = { path = "../padagonia" }
+# Sibling ELci crates are pinned to pushed revisions so a fresh clone of
+# this repository builds on its own (XACT_COMPLETION_DIRECTIVE.md M1.1).
+# For co-development against local checkouts, add an *uncommitted*
+# override, e.g.:
+#
+#     [patch."https://github.com/elci-group/mesut"]
+#     mesut = { path = "../mesut/crates/mesut" }
+#     mesut-observe = { path = "../mesut/crates/mesut-observe" }
+mesut = { git = "https://github.com/elci-group/mesut", rev = "5397efdd0a1621ad0177461af0732a4fa21975d4" }
+mesut-observe = { git = "https://github.com/elci-group/mesut", rev = "5397efdd0a1621ad0177461af0732a4fa21975d4" }
+padagonia = { git = "https://github.com/elci-group/padagonia", rev = "70620cfa665f1848e483971655628af0e7500f15" }

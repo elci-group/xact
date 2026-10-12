@@ -291,6 +291,7 @@ mod tests {
     /// actually-installed `ollama list` on this machine), but fast: no
     /// model load or generation ever starts.
     #[test]
+    #[ignore = "live: requires ollama"]
     fn unknown_model_fails_fast_with_a_clear_message() {
         let request = TellRequest {
             model: "definitely-not-a-real-model-xact-test".into(),
@@ -361,6 +362,7 @@ mod tests {
     /// completion case failed with "ollama exited with signal: 15" when
     /// run alongside the cancellation case).
     #[test]
+    #[ignore = "live: requires ollama with gemma3 pulled"]
     fn real_ollama_end_to_end_and_cancellation() {
         tell_runs_the_real_ollama_model_and_populates_a_real_file();
         cancellation_actually_kills_a_running_tell_call();

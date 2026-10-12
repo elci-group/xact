@@ -394,6 +394,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires gls"]
     fn resolves_real_filesystem_entries_after_an_ownership_keyword() {
         let dir = std::env::temp_dir().join(format!("xact-completion-graph-test-{}", std::process::id()));
         fs::create_dir_all(dir.join("project_alpha")).unwrap();
@@ -425,6 +427,7 @@ mod tests {
     /// `£ SEE MY project` should dynamic-complete against `~/project*`,
     /// not whatever directory the REPL happens to be running from.
     #[test]
+    #[ignore = "live: requires gls"]
     fn my_with_a_bare_relative_path_defaults_to_home_completion() {
         let _guard = HOME_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("xact-completion-graph-home-test-{}", std::process::id()));
@@ -469,6 +472,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires gls"]
     fn does_not_resolve_binaries_for_a_path_taking_verb() {
         // SEE has only a filesystem_path resolver (confirmed structurally
         // by xact-resolve's own resolvers_for_see_is_filesystem_path_only

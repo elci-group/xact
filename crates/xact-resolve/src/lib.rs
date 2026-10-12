@@ -621,6 +621,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires gls"]
     fn list_path_entries_finds_real_filesystem_matches() {
         let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("xact-resolve-path-test-{}", std::process::id()));
@@ -643,6 +645,7 @@ mod tests {
     /// to be true, since an uncached `gls` call is real subprocess work
     /// (tens of milliseconds at minimum).
     #[test]
+    #[ignore = "live: requires gls"]
     fn narrows_a_cached_real_listing_by_prefix_without_a_second_gls_call() {
         let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("xact-resolve-narrow-test-{}", std::process::id()));
@@ -682,6 +685,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires gls"]
     fn hidden_entries_are_included_matching_the_pre_gls_behavior() {
         let _guard = PATH_SENSITIVE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("xact-resolve-hidden-test-{}", std::process::id()));

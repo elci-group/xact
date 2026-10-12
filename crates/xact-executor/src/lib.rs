@@ -341,6 +341,8 @@ mod tests {
     use super::*;
 
     #[test]
+
+    #[ignore = "live: requires bank"]
     fn bank_plan_actually_creates_the_path() {
         let dir = std::env::temp_dir().join(format!("xact-executor-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -355,6 +357,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires gls"]
     fn view_directory_plan_runs_gls() {
         let outcome = execute(
             ExecutionPlan::ViewDirectory { path: std::env::temp_dir() },
@@ -413,6 +417,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires cgroup v2 delegation"]
     fn run_plan_under_a_resource_budget_is_still_constrained_for_real() {
         let budget = ResourceBudget { cpu_percent: Some(50), ..Default::default() };
         let outcome = execute(ExecutionPlan::Run { command_line: "true".into(), domain: xact_ast::OwnershipKind::My }, budget);
@@ -430,6 +436,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires bound"]
     fn bound_plan_actually_aggregates_a_real_directory() {
         let dir = std::env::temp_dir().join(format!("xact-executor-bound-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -449,6 +457,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires bound"]
     fn concurrent_bound_plan_reports_via_try_join() {
         let dir = std::env::temp_dir().join(format!("xact-executor-bound-concurrent-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -506,6 +516,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires bank"]
     fn concurrent_bank_plan_reports_via_try_join() {
         let dir = std::env::temp_dir().join(format!("xact-executor-concurrent-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -548,6 +560,7 @@ mod tests {
     /// Real, not stubbed: runs the actual local `ollama` model through
     /// the full executor dispatch. Slow (model load + generation).
     #[test]
+    #[ignore = "live: requires ollama with gemma3 pulled"]
     fn agent_plan_runs_the_real_provider_and_populates_a_real_file() {
         let dir = std::env::temp_dir().join(format!("xact-executor-agent-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

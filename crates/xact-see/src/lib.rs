@@ -73,6 +73,7 @@ mod tests {
     /// depend on `bat` being installed or on the exact exit-code behavior
     /// of whatever version is.
     #[test]
+    #[ignore = "live: requires gls and bat"]
     fn see_adapter_dispatches_by_tool_name() {
         assert!(
             view_directory(&std::env::temp_dir()).is_ok(),

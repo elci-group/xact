@@ -76,6 +76,8 @@ mod tests {
     use super::*;
 
     #[test]
+
+    #[ignore = "live: requires bound"]
     fn aggregates_a_real_directory_to_a_real_output_file() {
         let dir = std::env::temp_dir().join(format!("xact-bound-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -111,6 +113,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires bound and cgroup v2 delegation"]
     fn a_real_resource_budget_actually_constrains_bound() {
         let dir = std::env::temp_dir().join(format!("xact-bound-budget-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

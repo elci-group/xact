@@ -1,0 +1,7 @@
+# Test tiers (XACT_COMPLETION_DIRECTIVE.md §7.2): `cargo test --workspace`
+# is hermetic. Tests marked `#[ignore = "live: ..."]` need real host tools
+# (bank, gls, bat, bound, ollama) or cgroup v2 delegation; run them with:
+#
+#     cargo live-test
+[alias]
+live-test = "test --workspace -- --include-ignored"

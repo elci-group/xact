@@ -238,6 +238,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires cgroup v2 delegation"]
     fn a_real_resource_budget_actually_caps_the_process() {
         let budget = ResourceBudget { cpu_percent: Some(40), ..Default::default() };
         let status = run("true", OwnershipKind::My, &budget).expect("true should launch under a real cgroup cap");

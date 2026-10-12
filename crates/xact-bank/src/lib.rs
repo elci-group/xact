@@ -50,6 +50,8 @@ mod tests {
     use super::*;
 
     #[test]
+
+    #[ignore = "live: requires bank"]
     fn establishes_a_file_with_missing_parents() {
         let dir = std::env::temp_dir().join(format!("xact-bank-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -64,6 +66,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires bank"]
     fn establishes_a_directory_from_trailing_slash() {
         let dir = std::env::temp_dir().join(format!("xact-bank-test-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

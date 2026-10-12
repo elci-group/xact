@@ -242,6 +242,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires cgroup v2 delegation"]
     fn cpu_budget_writes_a_real_cpu_max_file_and_cleans_up_after() {
         let budget = ResourceBudget { cpu_percent: Some(40), ..Default::default() };
         let mut command = Command::new("true");
@@ -260,6 +262,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires cgroup v2 delegation"]
     fn ram_budget_writes_an_absolute_byte_cap() {
         let budget = ResourceBudget { ram_percent: Some(50), ..Default::default() };
         let mut command = Command::new("true");
@@ -294,6 +298,7 @@ mod tests {
     /// it. Uses `sh -c` with a shell counting loop so this doesn't depend
     /// on any extra binary being installed.
     #[test]
+    #[ignore = "live: requires cgroup v2 delegation"]
     fn cpu_cap_actually_throttles_a_real_process() {
         let busy_loop = "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done";
 

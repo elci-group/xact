@@ -555,6 +555,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires cgroup v2 delegation"]
     fn run_process_applies_a_real_resource_budget() {
         let budget = xact_ast::ResourceBudget { cpu_percent: Some(50), ..Default::default() };
         let outcome = run_process("true".into(), xact_ast::OwnershipKind::My, budget).expect("true should launch under a real cgroup cap");
@@ -568,6 +570,8 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires bank"]
     fn establish_path_actually_creates_the_path() {
         let dir = std::env::temp_dir().join(format!("xact-mesut-create-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -582,12 +586,16 @@ mod tests {
     }
 
     #[test]
+
+    #[ignore = "live: requires gls"]
     fn view_directory_runs_gls_through_the_adapter() {
         let result = view_directory(std::env::temp_dir());
         assert!(result.is_ok(), "gls is expected to be installed and to succeed: {result:?}");
     }
 
     #[test]
+
+    #[ignore = "live: requires bound"]
     fn bound_aggregate_runs_the_real_bound_tool() {
         let dir = std::env::temp_dir().join(format!("xact-mesut-bound-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -634,6 +642,7 @@ mod tests {
     /// `xact-tell` works in isolation (already covered by its own crate's
     /// tests). Slow (real local model load + generation).
     #[test]
+    #[ignore = "live: requires ollama with gemma3 pulled"]
     fn tell_async_runs_through_the_real_adapter_with_lifecycle_events() {
         let request = xact_tell::TellRequest {
             model: "gemma3".into(),
