@@ -69,6 +69,26 @@
 //! rule `ResourceBudget`'s own `unenforceable` list already enforces
 //! elsewhere.
 //!
+//! Capability policy (spec section 8's `WITHOUT`) is enforced here, at the
+//! provider boundary, before anything is read or sent: [`tell`] resolves
+//! which backend owns the target *first*, and refuses it if the budget
+//! denies that backend's tier — `agent-tools` (harnesses, which also need
+//! `network`), `agent-remote` (API providers, which also need `network`),
+//! or `agent-local` (Ollama). While `network`/`agent-remote` is denied,
+//! remote providers are never even asked for their model lists. Ollama is
+//! deliberately *not* placed in an isolated network namespace under
+//! `WITHOUT network`: `ollama run` only talks to the local daemon over
+//! loopback, and an uninstalled model is refused before `ollama` could try
+//! to pull it. Every other subprocess (harnesses, `bound` for `READING`)
+//! gets the same kernel network isolation as `£ RUN`.
+//!
+//! Sampling temperature is deliberately not set by Xact: every backend
+//! uses its provider's default. Several current reasoning models reject
+//! any non-default temperature outright, and `ollama run` and the CLI
+//! harnesses expose no temperature control at all, so a single explicit
+//! value could not be applied uniformly. This is a recorded decision,
+//! audited in `XACT_COMPLETION_DIRECTIVE.md` §6.7, not an omission.
+//!
 //! Cancellation mid-generation is real for subprocess backends (Xact–
 //! Mesut Integration Phase 8, continued): the spawned process is
 //! registered with `xact-cancel` between `spawn` and `wait_with_output`,
@@ -93,9 +113,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use xact_ast::ResourceBudget;
+use xact_ast::{Capability, ResourceBudget};
 
-pub use catalog::{known_targets, selectable_models};
+pub use catalog::{known_targets, prewarm, selectable_models, set_remote_lookups_allowed};
 
 #[derive(Debug)]
 pub struct TellError(String);
@@ -126,8 +146,12 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 /// a real process to constrain, writing the response to `populating` if
 /// given (via `bank`, same as `£ CREATE`) in addition to returning it.
 pub fn tell(request: &TellRequest, populating: Option<&Path>, budget: &ResourceBudget) -> Result<String, TellError> {
+    // Resolved before anything is read, so a backend the policy forbids is
+    // refused before any local content is gathered, let alone sent.
+    let backend = resolve_backend(&request.model, budget)?;
+
     let context = match &request.reading {
-        Some(path) if path.is_dir() => Some(aggregate_directory(path)?),
+        Some(path) if path.is_dir() => Some(aggregate_directory(path, budget)?),
         Some(path) => Some(
             std::fs::read_to_string(path)
                 .map_err(|err| TellError(format!("failed to read {}: {err}", path.display())))?,
@@ -137,10 +161,10 @@ pub fn tell(request: &TellRequest, populating: Option<&Path>, budget: &ResourceB
 
     let prompt = build_prompt(request.persona.as_deref(), context.as_deref(), &request.instruction, request.think);
 
-    let response = dispatch(&request.model, &prompt, request.think.is_some(), budget)?;
+    let response = run_backend(backend, &request.model, &prompt, request.think.is_some(), budget)?;
 
     if let Some(destination) = populating {
-        xact_bank::establish(destination)
+        xact_bank::establish(destination, &isolation_only(budget))
             .map_err(|err| TellError(format!("failed to establish {}: {err}", destination.display())))?;
         std::fs::write(destination, &response)
             .map_err(|err| TellError(format!("failed to write {}: {err}", destination.display())))?;
@@ -149,41 +173,93 @@ pub fn tell(request: &TellRequest, populating: Option<&Path>, budget: &ResourceB
     Ok(response)
 }
 
-/// Every pure-API provider this build knows, as `(display name, its
-/// cached model list, its real `run`)` — one entry per provider module,
-/// so adding a provider means adding a row here, not another copy of
-/// the same three-line check. All share one function-pointer shape,
-/// which every listed `models`/`run` already matches exactly (plain top-
-/// level `fn`s, no captures), so this is a plain `const` table, not
-/// something built at runtime.
-type ModelsFn = fn() -> Vec<String>;
+/// Every pure-API provider this build knows, as `(display name, catalog
+/// key, its real model-list fetch, its real `run`)` — one row per provider
+/// module, so adding a provider means adding a row here.
 type RunFn = fn(&str, &str) -> Result<String, TellError>;
-const API_PROVIDERS: &[(&str, ModelsFn, RunFn)] = &[
-    ("OpenAI", catalog::openai_models, openai::run),
-    ("Anthropic", catalog::anthropic_models, anthropic::run),
-    ("Groq", catalog::groq_models, groq::run),
-    ("xAI", catalog::xai_models, xai::run),
-    ("OpenRouter", catalog::openrouter_models, openrouter::run),
-    ("Moonshot (Kimi)", catalog::moonshot_models, moonshot::run),
-    ("Zhipu (z.ai)", catalog::zhipu_models, zhipu::run),
+const API_PROVIDERS: &[(&str, &str, catalog::ModelsFn, RunFn)] = &[
+    ("OpenAI", "openai", openai::models, openai::run),
+    ("Anthropic", "anthropic", anthropic::models, anthropic::run),
+    ("Groq", "groq", groq::models, groq::run),
+    ("xAI", "xai", xai::models, xai::run),
+    ("OpenRouter", "openrouter", openrouter::models, openrouter::run),
+    ("Moonshot (Kimi)", "moonshot", moonshot::models, moonshot::run),
+    ("Zhipu (z.ai)", "zhipu", zhipu::models, zhipu::run),
 ];
 
-/// Resolves `model` to a real backend and runs `prompt` through it — see
-/// this module's doc comment for the fixed try-order and why it's
-/// ordered that way. Falls all the way through to [`ollama::run`] (which
-/// does its own real "is this actually installed" check) when nothing
-/// more specific claims the name.
-fn dispatch(model: &str, prompt: &str, think: bool, budget: &ResourceBudget) -> Result<String, TellError> {
+/// The backend that owns a `TELL` target, already checked against policy.
+enum Backend {
+    Harness(&'static str),
+    Api(RunFn),
+    /// `remote_skipped` records that remote providers were not consulted
+    /// because the policy forbids them, so a "not installed" error can say
+    /// why the name was not looked up remotely.
+    Ollama {
+        remote_skipped: bool,
+    },
+}
+
+/// Resolves `model` to a backend in the fixed try-order described in this
+/// module's doc comment, refusing any tier `budget` denies.
+fn resolve_backend(model: &str, budget: &ResourceBudget) -> Result<Backend, TellError> {
     if let Some(flag) = harness::resolve(model) {
-        return harness::run(model, flag, prompt, budget);
+        for capability in [Capability::AgentTools, Capability::Network, Capability::ProcessSpawn] {
+            if budget.denies(capability) {
+                return Err(forbidden(model, "a CLI agent harness", capability));
+            }
+        }
+        return Ok(Backend::Harness(flag));
     }
-    for (name, models, run) in API_PROVIDERS {
-        if models().iter().any(|candidate| candidate == model) {
-            require_no_resource_budget(budget, name)?;
-            return run(model, prompt);
+
+    let remote_skipped = budget.denies(Capability::Network) || budget.denies(Capability::AgentRemote);
+    if !remote_skipped {
+        for (name, key, models, run) in API_PROVIDERS {
+            if catalog::models_now(key, *models).iter().any(|candidate| candidate == model) {
+                require_no_resource_budget(budget, name)?;
+                return Ok(Backend::Api(*run));
+            }
         }
     }
-    ollama::run(model, prompt, think, budget)
+
+    for capability in [Capability::AgentLocal, Capability::ProcessSpawn] {
+        if budget.denies(capability) {
+            return Err(forbidden(model, "a local Ollama model", capability));
+        }
+    }
+    Ok(Backend::Ollama { remote_skipped })
+}
+
+fn forbidden(model: &str, kind: &str, capability: Capability) -> TellError {
+    TellError(format!(
+        "'{model}' is {kind}, which needs '{cap}' — the active policy forbids it (! WITHOUT {cap}).",
+        cap = capability.as_str()
+    ))
+}
+
+fn run_backend(
+    backend: Backend,
+    model: &str,
+    prompt: &str,
+    think: bool,
+    budget: &ResourceBudget,
+) -> Result<String, TellError> {
+    match backend {
+        Backend::Harness(flag) => harness::run(model, flag, prompt, budget),
+        Backend::Api(run) => run(model, prompt),
+        Backend::Ollama { remote_skipped } => {
+            // `ollama run` must reach the local daemon over loopback, which
+            // a private network namespace would cut off; see the module doc.
+            let mut local = budget.clone();
+            local.denied.retain(|capability| *capability != Capability::Network);
+            ollama::run(model, prompt, think, &local).map_err(|err| {
+                if remote_skipped {
+                    TellError(format!("{err} (remote providers were not consulted: the active policy forbids them)"))
+                } else {
+                    err
+                }
+            })
+        }
+    }
 }
 
 /// A pure-API backend has no local process for `xact_resource::apply` to
@@ -201,13 +277,57 @@ fn require_no_resource_budget(budget: &ResourceBudget, backend: &str) -> Result<
     }
 }
 
-fn aggregate_directory(path: &Path) -> Result<String, TellError> {
+/// Whether any harness binary is installed — `WITH agent-tools`'s
+/// availability check.
+pub fn harness_available() -> bool {
+    !harness::available().is_empty()
+}
+
+/// Whether any remote provider has an API key configured — `WITH
+/// agent-remote`'s availability check. Reads only the environment; it
+/// makes no request.
+pub fn remote_provider_configured() -> bool {
+    [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GROQ_API_KEY",
+        "XAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "MOONSHOT_API_KEY",
+        "ZAI_API_KEY",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+}
+
+/// Whether the `ollama` binary is installed — `WITH agent-local`'s
+/// availability check.
+pub fn local_provider_available() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("ollama").is_file()))
+}
+
+/// Only `budget`'s capability denials, for the helper processes around an
+/// agent call (`bound` for `READING`, `bank` for `POPULATING`): they get the
+/// same network isolation as any other spawned process, while the
+/// `SPEND`/`SAVE` quota applies to the agent itself.
+pub fn isolation_only(budget: &ResourceBudget) -> ResourceBudget {
+    ResourceBudget { denied: budget.denied.clone(), ..ResourceBudget::default() }
+}
+
+fn aggregate_directory(path: &Path, budget: &ResourceBudget) -> Result<String, TellError> {
+    if budget.denies(Capability::ProcessSpawn) {
+        return Err(TellError(format!(
+            "READING the directory {} is aggregated by `bound`, which needs 'process-spawn' — \
+             the active policy forbids it (! WITHOUT process-spawn).",
+            path.display()
+        )));
+    }
     let temp = std::env::temp_dir().join(format!(
         "xact-tell-context-{}-{}.txt",
         std::process::id(),
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     ));
-    xact_bound::aggregate(path, Some(&temp), &ResourceBudget::default())
+    xact_bound::aggregate(path, Some(&temp), &isolation_only(budget))
         .map_err(|err| TellError(format!("failed to aggregate {}: {err}", path.display())))?;
     let content =
         std::fs::read_to_string(&temp).map_err(|err| TellError(format!("failed to read aggregated context: {err}")))?;
@@ -237,6 +357,33 @@ fn build_prompt(persona: Option<&str>, context: Option<&str>, instruction: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn denying(capabilities: &[Capability]) -> ResourceBudget {
+        ResourceBudget { denied: capabilities.to_vec(), ..ResourceBudget::default() }
+    }
+
+    #[test]
+    fn denied_agent_local_refuses_before_reading_any_context() {
+        let request = TellRequest {
+            model: "xact-test-not-a-harness".into(),
+            // Does not exist: if the policy check ran after reading, this
+            // would fail with a read error instead.
+            reading: Some(PathBuf::from("/nonexistent/xact/context.txt")),
+            instruction: "hi".into(),
+            ..TellRequest::default()
+        };
+        let err = tell(&request, None, &denying(&[Capability::AgentLocal, Capability::AgentRemote])).unwrap_err();
+        assert!(err.to_string().contains("WITHOUT agent-local"), "{err}");
+    }
+
+    #[test]
+    fn denied_network_skips_remote_providers_without_contacting_them() {
+        match resolve_backend("xact-test-not-a-harness", &denying(&[Capability::Network])) {
+            Ok(Backend::Ollama { remote_skipped }) => assert!(remote_skipped),
+            Ok(_) => panic!("a remote or harness backend was chosen despite WITHOUT network"),
+            Err(err) => panic!("unexpected refusal: {err}"),
+        }
+    }
 
     #[test]
     fn build_prompt_includes_every_stated_part_in_order() {

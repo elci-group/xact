@@ -14,3 +14,7 @@ xact-completion-graph = { workspace = true }
 xact-diagnostics = { workspace = true }
 xact-policy = { workspace = true }
 xact-agent = { workspace = true }
+xact-planner = { workspace = true }
+xact-resolve = { workspace = true }
+xact-resource = { workspace = true }
+xact-tell = { workspace = true }

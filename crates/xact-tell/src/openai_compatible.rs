@@ -14,6 +14,9 @@ use std::time::Duration;
 use crate::TellError;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Listing models is metadata, not inference: it gets a short ceiling of
+/// its own so a hung provider can't stall dispatch for two minutes.
+const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every model `api_key_env`'s key can see on `base_url`, or an empty
 /// list if that env var isn't set or the call fails for any reason —
@@ -25,7 +28,7 @@ pub fn models(base_url: &str, api_key_env: &str) -> Vec<String> {
     };
     let Ok(response) = ureq::get(&format!("{base_url}/models"))
         .set("Authorization", &format!("Bearer {key}"))
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(LIST_TIMEOUT)
         .call()
     else {
         return Vec::new();

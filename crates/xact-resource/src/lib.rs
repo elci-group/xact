@@ -30,6 +30,18 @@
 //!   generalized here to whichever layer is actually responsible for
 //!   enforcement — nothing in this crate ever runs a constrained command
 //!   unconstrained while pretending otherwise.
+//!
+//! # Network isolation (`! WITHOUT network`)
+//!
+//! When the budget denies [`Capability::Network`], [`apply`] also moves the
+//! child into a fresh, unprivileged user namespace plus a new, empty network
+//! namespace before `exec` (`unshare(CLONE_NEWUSER | CLONE_NEWNET)`, with the
+//! caller's own uid/gid mapped through so file ownership is unchanged). The
+//! new namespace has no interfaces except a down loopback, so the program
+//! can reach nothing, not even `localhost`; the kernel enforces this, not
+//! Xact. If the host forbids unprivileged user namespaces, `spawn` fails
+//! and the workload never starts — it is never run with network access
+//! instead. [`network_isolation_available`] checks this ahead of time.
 
 use std::fmt;
 use std::fs;
@@ -39,8 +51,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
-use xact_ast::ResourceBudget;
+use xact_ast::{Capability, ResourceBudget};
 
 #[derive(Debug)]
 pub struct ResourceError(String);
@@ -95,6 +108,17 @@ impl Drop for ResourceGuard {
 /// enforcement (enforcement belongs to the kernel, tied to the cgroup
 /// file existing, not to this guard's lifetime).
 pub fn apply(command: &mut Command, budget: &ResourceBudget) -> Result<Option<ResourceGuard>, ResourceError> {
+    // Registered after the cgroup join below (pre_exec hooks run in
+    // registration order), so the child is already in its cgroup when it
+    // enters the new user namespace.
+    let guard = apply_quotas(command, budget)?;
+    if budget.denies(Capability::Network) {
+        isolate_network(command);
+    }
+    Ok(guard)
+}
+
+fn apply_quotas(command: &mut Command, budget: &ResourceBudget) -> Result<Option<ResourceGuard>, ResourceError> {
     if budget.is_empty() {
         return Ok(None);
     }
@@ -148,6 +172,87 @@ pub fn apply(command: &mut Command, budget: &ResourceBudget) -> Result<Option<Re
     }
 
     Ok(Some(guard))
+}
+
+/// Adds a `pre_exec` hook that unshares a new user + network namespace in
+/// the child and maps the caller's uid/gid through unchanged. Everything
+/// that allocates happens here, before `fork`; the hook itself only makes
+/// raw syscalls on preformatted buffers.
+fn isolate_network(command: &mut Command) {
+    // SAFETY: geteuid/getegid cannot fail and have no preconditions.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    let uid_map = format!("{uid} {uid} 1\n");
+    let gid_map = format!("{gid} {gid} 1\n");
+
+    // SAFETY: the closure runs in the forked child before exec, where only
+    // async-signal-safe operations are allowed. It calls `unshare`, `open`,
+    // `write`, and `close` on NUL-terminated literals and buffers allocated
+    // before the fork, and allocates nothing itself.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // `setgroups` must be denied before an unprivileged process
+            // may write its own gid_map (user_namespaces(7)).
+            write_proc(c"/proc/self/setgroups", b"deny")?;
+            write_proc(c"/proc/self/uid_map", uid_map.as_bytes())?;
+            write_proc(c"/proc/self/gid_map", gid_map.as_bytes())?;
+            Ok(())
+        });
+    }
+}
+
+/// `open` + `write` + `close` with raw syscalls, for use between fork and exec.
+fn write_proc(path: &std::ffi::CStr, data: &[u8]) -> io::Result<()> {
+    // SAFETY: `path` is NUL-terminated and `data` is a live slice.
+    unsafe {
+        let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = libc::write(fd, data.as_ptr().cast(), data.len());
+        let err = io::Error::last_os_error();
+        libc::close(fd);
+        if written < 0 {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Whether this host lets Xact run a process in its own network namespace
+/// — i.e. whether `! WITHOUT network` can be enforced for spawned
+/// processes. Checked once, for real, by spawning `true` under isolation.
+pub fn network_isolation_available() -> Result<(), String> {
+    static AVAILABLE: OnceLock<Result<(), String>> = OnceLock::new();
+    AVAILABLE
+        .get_or_init(|| {
+            let mut command = Command::new("true");
+            isolate_network(&mut command);
+            match command.status() {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) => Err(format!("an isolated test process exited with {status}")),
+                Err(err) => Err(format!("unprivileged network namespaces are unavailable here ({err})")),
+            }
+        })
+        .clone()
+}
+
+/// Whether this host currently has a default route (IPv4 or IPv6) — the
+/// availability check behind `! WITH network`.
+pub fn has_default_route() -> bool {
+    let ipv4 = fs::read_to_string("/proc/net/route")
+        .is_ok_and(|table| table.lines().skip(1).any(|line| line.split_whitespace().nth(1) == Some("00000000")));
+    let ipv6 = fs::read_to_string("/proc/net/ipv6_route").is_ok_and(|table| {
+        table.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next() == Some("00000000000000000000000000000000")
+                && fields.next() == Some("00")
+                && fields.last() != Some("lo")
+        })
+    });
+    ipv4 || ipv6
 }
 
 fn require_controller(available: &str, controller: &str, path: &Path) -> Result<(), ResourceError> {
@@ -322,5 +427,26 @@ mod tests {
             "a 10%-of-one-core cap should make the same busy loop take well over 2x longer \
              (uncapped: {uncapped:?}, capped: {capped:?}) — the cap doesn't look real"
         );
+    }
+
+    #[test]
+    #[ignore = "live: requires unprivileged user namespaces"]
+    fn denied_network_puts_the_process_in_an_empty_network_namespace() {
+        let budget = ResourceBudget { denied: vec![Capability::Network], ..Default::default() };
+        // Inside the new namespace /proc/net/route has only its header
+        // line: there is no interface to route through.
+        let mut command = Command::new("sh");
+        command.args(["-c", "test $(wc -l < /proc/net/route) -le 1 && test $(id -u) = \"$EXPECTED_UID\""]);
+        command.env("EXPECTED_UID", unsafe { libc::geteuid() }.to_string());
+        let guard = apply(&mut command, &budget).unwrap();
+        assert!(guard.is_none(), "a capability denial alone needs no cgroup");
+        assert!(command.status().unwrap().success(), "the child must see no routes and keep its own uid");
+    }
+
+    #[test]
+    fn network_is_untouched_when_not_denied() {
+        let mut command = Command::new("true");
+        assert!(apply(&mut command, &ResourceBudget::default()).unwrap().is_none());
+        assert!(command.status().unwrap().success());
     }
 }

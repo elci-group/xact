@@ -8,8 +8,9 @@
 //! plain process launch) as blocking work to a Mesut runtime instead of
 //! running it inline. `xact-bank`/`xact-see`/`xact-process` still own how
 //! each tool is actually invoked; this crate no longer calls them
-//! directly. Resource control (spec section 22) is not implemented — a
-//! run is not yet constrained by any `SPEND`/`SAVE` policy in effect.
+//! directly. The `ResourceBudget` passed to [`execute`] carries both
+//! `SPEND`/`SAVE` quotas and `WITHOUT`'s denied capabilities to the
+//! adapters that enforce them (see below).
 //!
 //! [`execute`] runs a plan and blocks for its real result — the right
 //! choice for `! CONSECUTIVELY` (spec section 23's `A → B`: the next
@@ -27,14 +28,13 @@
 //! `join`/`try_join` report (spec section 19).
 //!
 //! [`execute`]/[`execute_concurrent`] both take a `ResourceBudget` (spec
-//! section 22, Xact–Mesut Integration Phase 5) and apply it to
-//! `ExecutionPlan::Run` and `ExecutionPlan::Bound` — `xact-process`/
-//! `xact-bound` (via `xact-resource`'s real cgroup v2 enforcement) are
-//! what actually constrain them. `Bank`/`ViewDirectory`/`ViewFile` ignore
-//! the budget for now: `bank`/`gls`/`bat` are typically short-lived, and
-//! every spec/directive example of `SPEND`/`SAVE` pairs it with `RUN` —
-//! widening enforcement to those is a scope decision to make later, not
-//! an oversight here.
+//! section 22, Xact–Mesut Integration Phase 5) and pass it to every plan
+//! that spawns a process — `bank`, `gls`/`bat`, `RUN`, `bound`, and agent
+//! backends — where `xact-resource` enforces its `SPEND`/`SAVE` quotas with
+//! cgroup v2 and its `WITHOUT network` denial with a private network
+//! namespace. `COPY`/`MOVE` spawn nothing (native transfer) and need no
+//! process-level enforcement; `WITHOUT filesystem-write` refuses them
+//! during validation instead.
 //!
 //! `ExecutionPlan::Bound` (Xact–Mesut Integration Phase 6 — "route
 //! appropriate BANK/BOUND operations through the unified execution
@@ -117,9 +117,11 @@ pub enum ExecutionOutcome {
 
 pub fn execute(plan: ExecutionPlan, budget: ResourceBudget) -> ExecutionOutcome {
     match plan {
-        ExecutionPlan::Bank { path } => bank_outcome(xact_mesut::establish_path(path)),
-        ExecutionPlan::ViewDirectory { path } => view_outcome(path.clone(), "gls", xact_mesut::view_directory(path)),
-        ExecutionPlan::ViewFile { path } => view_outcome(path.clone(), "bat", xact_mesut::view_file(path)),
+        ExecutionPlan::Bank { path } => bank_outcome(xact_mesut::establish_path(path, budget)),
+        ExecutionPlan::ViewDirectory { path } => {
+            view_outcome(path.clone(), "gls", xact_mesut::view_directory(path, budget))
+        }
+        ExecutionPlan::ViewFile { path } => view_outcome(path.clone(), "bat", xact_mesut::view_file(path, budget)),
         ExecutionPlan::Run { command_line, domain } => {
             run_outcome(command_line.clone(), xact_mesut::run_process(command_line, domain, budget))
         }
@@ -158,13 +160,13 @@ pub fn execute_concurrent(plan: ExecutionPlan, budget: ResourceBudget) -> Result
     let submission_failed = |err: xact_mesut::AdapterError| ExecutionOutcome::Failed { message: err.to_string() };
 
     match plan {
-        ExecutionPlan::Bank { path } => xact_mesut::establish_path_async(path)
+        ExecutionPlan::Bank { path } => xact_mesut::establish_path_async(path, budget)
             .map(|task| Pending(PendingKind::Bank { task }))
             .map_err(submission_failed),
-        ExecutionPlan::ViewDirectory { path } => xact_mesut::view_directory_async(path.clone())
+        ExecutionPlan::ViewDirectory { path } => xact_mesut::view_directory_async(path.clone(), budget)
             .map(|task| Pending(PendingKind::View { path, tool: "gls", task }))
             .map_err(submission_failed),
-        ExecutionPlan::ViewFile { path } => xact_mesut::view_file_async(path.clone())
+        ExecutionPlan::ViewFile { path } => xact_mesut::view_file_async(path.clone(), budget)
             .map(|task| Pending(PendingKind::View { path, tool: "bat", task }))
             .map_err(submission_failed),
         ExecutionPlan::Run { command_line, domain } => {

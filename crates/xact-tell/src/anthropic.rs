@@ -14,6 +14,9 @@ use crate::TellError;
 const BASE_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Listing models is metadata, not inference: it gets a short ceiling of
+/// its own so a hung provider can't stall dispatch for two minutes.
+const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// A real conversational reply comfortably fits well under this; it's a
 /// ceiling against runaway cost, not a target length.
 const MAX_TOKENS: u32 = 4096;
@@ -28,7 +31,7 @@ pub fn models() -> Vec<String> {
     let Ok(response) = ureq::get(&format!("{BASE_URL}/models"))
         .set("x-api-key", &key)
         .set("anthropic-version", ANTHROPIC_VERSION)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(LIST_TIMEOUT)
         .call()
     else {
         return Vec::new();

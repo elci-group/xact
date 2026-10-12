@@ -1,34 +1,48 @@
 //! Session state that ties the deterministic pipeline together:
-//! lex -> parse -> semantic/policy validation -> reference/identity/policy update.
+//! lex -> parse -> semantic/capability/policy validation ->
+//! reference/identity/policy update.
 //!
 //! `xact-core` deliberately stops at *validation*, not execution.
-//! `SessionOutcome::Accepted` means "grammatically and semantically valid,
-//! ready to plan" — turning that into an `ExecutionPlan` and running it is
-//! `xact-planner`/`xact-executor`'s job (spec sections 20-21), which a
-//! caller invokes separately using [`Session::references`] (see
-//! `xact-cli` for the reference wiring). Only `CREATE` has a real plan so
-//! far; every other verb reports itself unsupported rather than executing.
+//! `SessionOutcome::Accepted` means "grammatically, semantically, and
+//! policy-valid, ready to plan" — turning that into an `ExecutionPlan` and
+//! running it is `xact-planner`/`xact-executor`'s job (spec sections
+//! 20-21), which a caller (`xact-cli`) invokes separately using
+//! [`Session::references`] and [`Session::owner_roots`].
+//!
+//! Capability policy is part of validation (spec section 19): a command
+//! whose operation needs a capability forbidden by `! WITHOUT` is
+//! rejected here, before it is accepted, so it can never run partway
+//! through a block. `! WITH` is accepted only when the capability is
+//! actually available on this host (see [`probe_capability`]).
+//!
+//! [`Session`] is `Clone` so a caller can validate a whole block against a
+//! throwaway copy before executing any of it (spec section 18; see
+//! `xact-cli`'s batch mode).
 
 use xact_agent::ValidatedAgentBlock;
-use xact_ast::{AgentBlock, Command, Line, PolicyOperator, PolicyStatement};
+use xact_ast::{AgentBlock, Capability, Command, Line, PolicyOperator, PolicyStatement};
 use xact_diagnostics::Diagnostic;
 use xact_parser::{parse_line, ParseOutcome};
 use xact_policy::PolicyContext;
 use xact_reference::ReferenceContext;
+use xact_resolve::OwnerRoots;
 use xact_semantic::{validate, IdentityContext};
 
 #[derive(Debug, Clone)]
 pub enum SessionOutcome {
-    /// A grammatically and semantically valid command — ready for the (not
-    /// yet implemented) planner/executor.
-    Accepted(Command),
+    /// A grammatically, semantically, and policy-valid command, ready for
+    /// `xact-planner`/`xact-executor`. The [`ReferenceContext`] is the one
+    /// the command was validated in — what *its* `THIS`/`THAT` mean — and is
+    /// what it must be planned with: by the time `submit` returns, the
+    /// session's own context already reflects this command's result, so
+    /// `£ COPY THAT to MY ~/b` planned against [`Session::references`]
+    /// would read `THAT` as `~/b` itself.
+    Accepted(Command, ReferenceContext),
     /// A grammatically valid, internally consistent policy statement — now
-    /// part of this session's active policy context. Not yet enforced by
-    /// any executor.
+    /// part of this session's active policy context.
     PolicyAccepted(PolicyStatement),
-    /// A grammatically and semantically valid agent block — a semantic
-    /// intent, not a dispatch to any actual agent provider (spec section 9;
-    /// `xact-agent`/`xact-planner` do not run agents yet).
+    /// A valid agent block — a semantic intent (spec section 9), ready for
+    /// `xact-planner::plan_agent`/`xact-executor`.
     AgentAccepted(AgentBlock),
     /// A valid prefix that needs more input before it can be evaluated.
     Incomplete(Diagnostic),
@@ -36,7 +50,7 @@ pub enum SessionOutcome {
     Rejected(Vec<Diagnostic>),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Session {
     identity: IdentityContext,
     references: ReferenceContext,
@@ -44,33 +58,96 @@ pub struct Session {
     last_outcome: Option<bool>,
 }
 
+/// `WITH`'s availability check: whether `capability` can actually be
+/// provided on this host right now. Each answer comes from the crate that
+/// owns the capability.
+pub fn probe_capability(capability: Capability) -> Result<(), String> {
+    let available = |ok: bool, reason: &str| if ok { Ok(()) } else { Err(reason.to_string()) };
+    match capability {
+        Capability::Network => available(xact_resource::has_default_route(), "this host has no default network route"),
+        Capability::ProcessSpawn | Capability::FilesystemWrite => Ok(()),
+        Capability::Clipboard => available(
+            std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some(),
+            "there is no desktop session (neither WAYLAND_DISPLAY nor DISPLAY is set)",
+        ),
+        Capability::AgentLocal => available(xact_tell::local_provider_available(), "`ollama` is not installed"),
+        Capability::AgentRemote => {
+            available(xact_tell::remote_provider_configured(), "no provider API key is set in the environment")
+        }
+        Capability::AgentTools => {
+            available(xact_tell::harness_available(), "no supported CLI agent harness is installed")
+        }
+    }
+}
+
+/// Starts background refreshes of the agent-model catalog completion reads
+/// (see `xact_tell::prewarm`); returns immediately.
+pub fn prewarm_completion() {
+    xact_tell::prewarm();
+}
+
 impl Session {
+    /// A fresh session whose `OUR` root comes from `XACT_OUR_ROOT`.
     pub fn new() -> Self {
-        Self::default()
+        Self { identity: IdentityContext::from_env(), ..Self::default() }
+    }
+
+    /// The roots owned paths resolve against (`OUR`'s shared root and the
+    /// declared `THEY` users' homes), for planning and completion.
+    pub fn owner_roots(&self) -> &OwnerRoots {
+        self.identity.roots()
+    }
+
+    /// Spec section 19's capability level for an accepted operation.
+    fn authorize(&self, operation: &str, required: &[Capability]) -> Result<(), Vec<Diagnostic>> {
+        self.policy
+            .authorize(operation, required)
+            .map_err(|reason| vec![Diagnostic::invalid(reason, xact_ast::Span::default(), vec![])])
     }
 
     pub fn submit(&mut self, input: &str) -> SessionOutcome {
         match parse_line(input) {
-            ParseOutcome::Complete(Line::Command(command)) => match validate(command, &self.identity, &self.references)
-            {
-                Ok(validated) => {
-                    if let Command::Identity(decl) = &validated.command {
-                        self.identity.set(decl.members.clone());
+            ParseOutcome::Complete(Line::Command(command)) => {
+                let validated = match validate(command, &self.identity, &self.references) {
+                    Ok(validated) => validated,
+                    Err(diagnostics) => return SessionOutcome::Rejected(diagnostics),
+                };
+                if let Command::Imperative(cmd) = &validated.command {
+                    let required = xact_planner::required_capabilities(&validated.command);
+                    if let Err(diagnostics) = self.authorize(cmd.verb.as_str(), &required) {
+                        return SessionOutcome::Rejected(diagnostics);
                     }
-                    if let Some(object) = validated.establishes.clone() {
-                        self.references.record(object);
-                    }
-                    SessionOutcome::Accepted(validated.command)
                 }
-                Err(diagnostics) => SessionOutcome::Rejected(diagnostics),
-            },
-            ParseOutcome::Complete(Line::Policy(stmt)) => match xact_policy::apply(stmt, &mut self.policy) {
-                Ok(applied) => SessionOutcome::PolicyAccepted(applied),
-                Err(diagnostic) => SessionOutcome::Rejected(vec![diagnostic]),
-            },
+                if let Some(members) = validated.identity.clone() {
+                    self.identity.set(members);
+                }
+                let references_before = self.references.clone();
+                if let Some(established) = validated.establishes.clone() {
+                    self.references.record(established.input, established.result);
+                }
+                SessionOutcome::Accepted(validated.command, references_before)
+            }
+            ParseOutcome::Complete(Line::Policy(stmt)) => {
+                match xact_policy::apply(stmt, &mut self.policy, &probe_capability) {
+                    Ok(applied) => {
+                        let denied = self.policy.denied();
+                        let remote_allowed =
+                            !denied.contains(&Capability::Network) && !denied.contains(&Capability::AgentRemote);
+                        xact_tell::set_remote_lookups_allowed(remote_allowed);
+                        SessionOutcome::PolicyAccepted(applied)
+                    }
+                    Err(diagnostic) => SessionOutcome::Rejected(vec![diagnostic]),
+                }
+            }
             ParseOutcome::Complete(Line::Agent(block)) => {
                 match xact_agent::validate(block, &self.identity, &self.references) {
-                    Ok(ValidatedAgentBlock { block }) => SessionOutcome::AgentAccepted(block),
+                    Ok(ValidatedAgentBlock { block }) => {
+                        let required = xact_planner::required_agent_capabilities(&block);
+                        if let Err(diagnostics) = self.authorize(block.verb.as_str(), &required) {
+                            return SessionOutcome::Rejected(diagnostics);
+                        }
+                        SessionOutcome::AgentAccepted(block)
+                    }
                     Err(diagnostics) => SessionOutcome::Rejected(diagnostics),
                 }
             }
@@ -98,16 +175,17 @@ impl Session {
     /// order had to change: static no longer gets a chance to shadow the
     /// real target list there.
     pub fn complete(&self, input: &str) -> Vec<String> {
-        let dynamic_suggestions = xact_completion_graph::dynamic_complete(input);
+        let dynamic_suggestions = xact_completion_graph::dynamic_complete_with(input, self.owner_roots());
         if !dynamic_suggestions.is_empty() {
             return dynamic_suggestions;
         }
         self.policy.filter_suggestions(xact_completion::complete(input))
     }
 
-    /// This session's resolved-reference state, for a caller that wants to
-    /// plan and execute an [`SessionOutcome::Accepted`] command (spec
-    /// sections 20-21) — `xact-core` itself never plans or executes.
+    /// This session's current reference state, including the most recently
+    /// accepted command's result. To plan that command itself, use the
+    /// context carried by [`SessionOutcome::Accepted`]; this one is for
+    /// `@` blocks (which establish nothing) and inspection.
     pub fn references(&self) -> &ReferenceContext {
         &self.references
     }
@@ -138,16 +216,10 @@ impl Session {
     /// itself — a caller (`xact-cli`) reports the real result back here
     /// once it has one.
     ///
-    /// Xact's reference model has a single "most recent" slot for
-    /// `THIS`/`THAT`, not one per established object (spec section 11)
-    /// — this mirrors that: one session-wide slot, not a per-object
-    /// history. It reflects the outcome of whatever most recently
-    /// *actually ran*, which is not always whatever `THIS`/`THAT`'s
-    /// current value happens to be — a verb with no execution plan yet
-    /// still establishes a reference (`resolve_established` in
-    /// `xact-semantic`) without ever running anything. This is the same
-    /// flat, session-wide model `CONCURRENTLY`/`SPEND` already use, not a
-    /// gap specific to dependencies.
+    /// One session-wide slot: both `WHEN THIS` and `WHEN THAT` ask about
+    /// the outcome of whatever most recently *actually ran*. (`THIS`/`THAT`
+    /// differ as objects — input vs result, see `xact-reference` — but a
+    /// command has a single outcome.)
     pub fn record_outcome(&mut self, success: bool) {
         self.last_outcome = Some(success);
     }
@@ -169,15 +241,15 @@ mod tests {
     fn their_rejected_then_accepted_after_identity() {
         let mut session = Session::new();
         assert!(matches!(session.submit("£ SEE THEIR ~/shared"), SessionOutcome::Rejected(_)));
-        assert!(matches!(session.submit("£ THEY are \"alice,bob\""), SessionOutcome::Accepted(_)));
-        assert!(matches!(session.submit("£ SEE THEIR ~/shared"), SessionOutcome::Accepted(_)));
+        assert!(matches!(session.submit("£ THEY are \"root\""), SessionOutcome::Accepted(..)));
+        assert!(matches!(session.submit("£ SEE THEIR ~/shared"), SessionOutcome::Accepted(..)));
     }
 
     #[test]
     fn that_resolves_to_previously_established_object() {
         let mut session = Session::new();
-        assert!(matches!(session.submit("£ SEE MY ~/project/README.md"), SessionOutcome::Accepted(_)));
-        assert!(matches!(session.submit("£ EDIT THAT"), SessionOutcome::Accepted(_)));
+        assert!(matches!(session.submit("£ SEE MY ~/project/README.md"), SessionOutcome::Accepted(..)));
+        assert!(matches!(session.submit("£ EDIT THAT"), SessionOutcome::Accepted(..)));
     }
 
     #[test]
@@ -196,7 +268,7 @@ mod tests {
     fn policy_statement_accepted_and_tracked_across_session() {
         let mut session = Session::new();
         assert!(matches!(session.submit("! SAVE 20%RAM 30%CPU"), SessionOutcome::PolicyAccepted(_)));
-        assert!(matches!(session.submit("£ RUN 'chrome'"), SessionOutcome::Accepted(_)));
+        assert!(matches!(session.submit("£ RUN 'chrome'"), SessionOutcome::Accepted(..)));
     }
 
     #[test]
@@ -234,7 +306,7 @@ mod tests {
     #[test]
     fn agent_populating_that_resolves_from_prior_command() {
         let mut session = Session::new();
-        assert!(matches!(session.submit("£ SEE MY ~/project/review/"), SessionOutcome::Accepted(_)));
+        assert!(matches!(session.submit("£ SEE MY ~/project/review/"), SessionOutcome::Accepted(..)));
         assert!(matches!(session.submit("@ TELL 'x' POPULATING THAT \"go\""), SessionOutcome::AgentAccepted(_)));
     }
 
@@ -276,7 +348,73 @@ mod tests {
     #[test]
     fn when_that_parses_and_validates_once_something_is_established() {
         let mut session = Session::new();
-        assert!(matches!(session.submit("£ RUN 'compile'"), SessionOutcome::Accepted(_)));
-        assert!(matches!(session.submit(&when_that("SUCCEEDS")), SessionOutcome::Accepted(_)));
+        assert!(matches!(session.submit("£ RUN 'compile'"), SessionOutcome::Accepted(..)));
+        assert!(matches!(session.submit(&when_that("SUCCEEDS")), SessionOutcome::Accepted(..)));
+    }
+
+    #[test]
+    fn they_with_an_unknown_user_is_rejected() {
+        let mut session = Session::new();
+        assert!(matches!(session.submit("£ THEY are \"xact-no-such-user-for-tests\""), SessionOutcome::Rejected(_)));
+    }
+
+    #[test]
+    fn without_rejects_an_operation_that_needs_the_capability() {
+        let mut session = Session::new();
+        assert!(matches!(session.submit("! WITHOUT filesystem-write"), SessionOutcome::PolicyAccepted(_)));
+        match session.submit("£ CREATE MY /tmp/xact-never-created") {
+            SessionOutcome::Rejected(diagnostics) => {
+                assert!(diagnostics[0].message.contains("WITHOUT filesystem-write"), "{diagnostics:?}")
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        // Operations that don't need it are unaffected.
+        assert!(matches!(session.submit("£ SEE MY /tmp"), SessionOutcome::Accepted(..)));
+    }
+
+    #[test]
+    fn rejected_commands_establish_no_reference() {
+        let mut session = Session::new();
+        session.submit("! WITHOUT filesystem-write");
+        session.submit("£ CREATE MY /tmp/xact-never-created");
+        assert!(matches!(session.submit("£ SEE THAT"), SessionOutcome::Rejected(_)));
+    }
+
+    #[test]
+    fn this_and_that_name_a_copys_source_and_destination() {
+        let mut session = Session::new();
+        session.submit("£ COPY MY /tmp/a to MY /tmp/b");
+        assert_eq!(
+            session.references().resolve(xact_ast::ReferenceKind::This),
+            Some(&xact_reference::ResolvedObject::Path("/tmp/a".into()))
+        );
+        assert_eq!(
+            session.references().resolve(xact_ast::ReferenceKind::That),
+            Some(&xact_reference::ResolvedObject::Path("/tmp/b".into()))
+        );
+    }
+
+    #[test]
+    fn a_cloned_session_validates_without_touching_the_original() {
+        let session = Session::new();
+        let mut dry_run = session.clone();
+        assert!(matches!(dry_run.submit("£ SEE MY /tmp"), SessionOutcome::Accepted(..)));
+        assert!(session.references().resolve(xact_ast::ReferenceKind::That).is_none());
+    }
+
+    /// The bug this guards against: `submit` records a command's own
+    /// result before returning, so planning `£ COPY THAT to ...` against the
+    /// session's *current* references would make THAT the destination.
+    #[test]
+    fn an_accepted_command_carries_the_references_it_was_validated_in() {
+        let mut session = Session::new();
+        session.submit("£ CREATE MY /tmp/xact-made.txt");
+        match session.submit("£ COPY THAT to MY /tmp/xact-copy.txt") {
+            SessionOutcome::Accepted(_, references) => assert_eq!(
+                references.resolve(xact_ast::ReferenceKind::That),
+                Some(&xact_reference::ResolvedObject::Path("/tmp/xact-made.txt".into()))
+            ),
+            other => panic!("expected acceptance, got {other:?}"),
+        }
     }
 }

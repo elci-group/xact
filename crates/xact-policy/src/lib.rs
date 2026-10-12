@@ -8,25 +8,34 @@
 //! - `CONCURRENTLY`/`CONSECUTIVELY` are singleton and mutually exclusive
 //!   for a block (section 16).
 //!
-//! Turning an accepted [`PolicyContext`] into actual enforcement (real
-//! resource limits, real capability gating) is the execution planner's job
-//! (spec sections 20-22); `SPEND`/`SAVE` and `CONCURRENTLY`/`CONSECUTIVELY`
-//! are real today (Xact–Mesut Integration Phases 3/5) via
-//! `Session::resource_budget`/`schedule`. `PolicyOperator::When` (`!
-//! WHEN <condition>`, a standalone policy statement per spec section 8's
-//! original vocabulary) is still just tracked here, not enforced — it is
-//! *not* the same thing as the real `WHEN THIS/THAT SUCCEEDS`/`FAILS`
-//! dependency clause `xact-ast::DependencyClause` attaches directly to an
-//! imperative command (Xact–Mesut Integration Phase 8, section 9's
-//! concrete `£ RUN 'test' WHEN THAT succeeds` example): that one is a
-//! different grammatical position, parsed by `xact-parser` as part of the
-//! command itself and enforced by `xact-cli`/`xact-core`, not by this
-//! crate. Two different `WHEN`s exist in the language today for that
-//! reason — see `crates/xact-cli/src/main.rs`'s module docs.
+//! Turning an accepted [`PolicyContext`] into enforcement:
+//!
+//! - `SPEND`/`SAVE` resolve to a [`ResourceBudget`] that `xact-resource`
+//!   enforces with cgroup v2; `CONCURRENTLY`/`CONSECUTIVELY` drive the
+//!   CLI's scheduling (Xact–Mesut Integration Phases 3/5).
+//! - `WITHOUT <capability>` is a hard prohibition, enforced at two points:
+//!   [`PolicyContext::authorize`] rejects any command whose operation needs
+//!   a forbidden capability before it is accepted (spec section 19's
+//!   capability validation level), and [`ResourceBudget::denied`] carries
+//!   the prohibition down to the adapters that enforce it at the kernel or
+//!   provider boundary (a private network namespace for every spawned
+//!   process under `WITHOUT network`; refused agent backends).
+//! - `WITH <capability>` is a hard requirement: it is only accepted if the
+//!   capability is actually available on this host right now, checked
+//!   through the caller-supplied probe (see [`apply`]).
+//! - `PREFER`/`DODGE` are soft and advisory. They are validated against the
+//!   same vocabulary and can never contradict a hard constraint, but no
+//!   operation Xact plans today has an alternative for them to choose
+//!   between, and the CLI says so when one is accepted.
+//!
+//! A standalone `! WHEN <condition>` is rejected by the parser (there is no
+//! condition language to enforce it with); the enforced dependency form is
+//! the command-level `WHEN THIS/THAT SUCCEEDS|FAILS` clause, handled by
+//! `xact-core`/`xact-cli`.
 
 use std::collections::{HashMap, HashSet};
 
-use xact_ast::{PolicyArgs, PolicyOperator, PolicyStatement, ResourceBudget, ResourceQuota};
+use xact_ast::{Capability, PolicyArgs, PolicyOperator, PolicyStatement, ResourceBudget, ResourceQuota};
 use xact_diagnostics::Diagnostic;
 
 #[derive(Debug, Clone, Default)]
@@ -40,7 +49,6 @@ pub struct PolicyContext {
     /// contradictory `SPEND 10%RAM` followed by `SAVE 10%RAM`.
     quota_owner: HashMap<String, PolicyOperator>,
     quotas: Vec<(PolicyOperator, ResourceQuota)>,
-    conditions: Vec<(PolicyOperator, String)>,
 }
 
 impl PolicyContext {
@@ -68,7 +76,7 @@ impl PolicyContext {
     /// `apply` already rejects a same-resource SPEND/SAVE *conflict*, so
     /// this only ever resolves repeated agreement, never a contradiction.
     pub fn resource_budget(&self) -> ResourceBudget {
-        let mut budget = ResourceBudget::default();
+        let mut budget = ResourceBudget { denied: self.denied(), ..ResourceBudget::default() };
         for (operator, quota) in &self.quotas {
             let cap = match operator {
                 PolicyOperator::Spend => quota.percent,
@@ -89,6 +97,24 @@ impl PolicyContext {
         budget
     }
 
+    /// Every capability `WITHOUT` currently forbids, in vocabulary order.
+    pub fn denied(&self) -> Vec<Capability> {
+        Capability::ALL.into_iter().filter(|c| self.hard_without.contains(c.as_str())).collect()
+    }
+
+    /// Spec section 19's capability validation level: `Err` names the first
+    /// capability in `required` that a `WITHOUT` statement forbids.
+    /// `operation` is only used to word the message.
+    pub fn authorize(&self, operation: &str, required: &[Capability]) -> Result<(), String> {
+        match required.iter().find(|c| self.hard_without.contains(c.as_str())) {
+            Some(capability) => Err(format!(
+                "{operation} needs '{cap}', which the active policy forbids (! WITHOUT {cap}).",
+                cap = capability.as_str()
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Removes already-established singleton operators from a completion
     /// suggestion list (spec section 16). Stateless `xact-completion`
     /// cannot know this on its own — it has no session history.
@@ -103,7 +129,18 @@ impl PolicyContext {
     }
 }
 
-pub fn apply(stmt: PolicyStatement, context: &mut PolicyContext) -> Result<PolicyStatement, Diagnostic> {
+/// Answers "is this capability actually available on this host right
+/// now?" for `WITH`. Supplied by the caller (`xact-core`), because the
+/// answer lives in the crates that own each capability (`xact-resource`
+/// for network isolation, `xact-tell` for agent backends) and this crate
+/// must not depend on them. `Err` carries the reason it isn't.
+pub type CapabilityProbe<'a> = &'a dyn Fn(Capability) -> Result<(), String>;
+
+pub fn apply(
+    stmt: PolicyStatement,
+    context: &mut PolicyContext,
+    probe: CapabilityProbe<'_>,
+) -> Result<PolicyStatement, Diagnostic> {
     match stmt.operator {
         PolicyOperator::Concurrently | PolicyOperator::Consecutively => {
             if let Some(existing) = context.schedule {
@@ -129,6 +166,15 @@ pub fn apply(stmt: PolicyStatement, context: &mut PolicyContext) -> Result<Polic
             }
             if context.soft_dodge.contains(&key) {
                 return Err(overrides_hard(&stmt, PolicyOperator::Dodge));
+            }
+            if let Some(capability) = Capability::parse(&key) {
+                if let Err(reason) = probe(capability) {
+                    return Err(Diagnostic::invalid(
+                        format!("WITH {key} cannot be honoured on this host: {reason}"),
+                        stmt.operator_span,
+                        vec![],
+                    ));
+                }
             }
             context.hard_with.insert(key);
             Ok(stmt)
@@ -205,13 +251,14 @@ pub fn apply(stmt: PolicyStatement, context: &mut PolicyContext) -> Result<Polic
             }
             Ok(stmt)
         }
-        PolicyOperator::When => {
-            let PolicyArgs::Condition { text, .. } = &stmt.args else {
-                unreachable!("parser guarantees WHEN carries Condition args")
-            };
-            context.conditions.push((stmt.operator, text.clone()));
-            Ok(stmt)
-        }
+        // The parser already rejects `! WHEN`; this is the same refusal for
+        // a statement constructed some other way, so it can never be
+        // recorded and then ignored.
+        PolicyOperator::When => Err(Diagnostic::invalid(
+            "! WHEN is not supported; attach WHEN THIS/THAT SUCCEEDS|FAILS to a command instead.",
+            stmt.operator_span,
+            vec![],
+        )),
     }
 }
 
@@ -267,6 +314,10 @@ mod tests {
     use super::*;
     use xact_ast::Span;
 
+    fn apply_ok(stmt: PolicyStatement, ctx: &mut PolicyContext) -> Result<PolicyStatement, Diagnostic> {
+        apply(stmt, ctx, &|_| Ok(()))
+    }
+
     fn capability(op: PolicyOperator, name: &str) -> PolicyStatement {
         PolicyStatement {
             operator: op,
@@ -299,63 +350,63 @@ mod tests {
     #[test]
     fn concurrently_then_consecutively_conflicts() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(schedule(PolicyOperator::Concurrently), &mut ctx).is_ok());
-        assert!(apply(schedule(PolicyOperator::Consecutively), &mut ctx).is_err());
+        assert!(apply_ok(schedule(PolicyOperator::Concurrently), &mut ctx).is_ok());
+        assert!(apply_ok(schedule(PolicyOperator::Consecutively), &mut ctx).is_err());
     }
 
     #[test]
     fn restating_same_schedule_is_fine() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(schedule(PolicyOperator::Concurrently), &mut ctx).is_ok());
-        assert!(apply(schedule(PolicyOperator::Concurrently), &mut ctx).is_ok());
+        assert!(apply_ok(schedule(PolicyOperator::Concurrently), &mut ctx).is_ok());
+        assert!(apply_ok(schedule(PolicyOperator::Concurrently), &mut ctx).is_ok());
     }
 
     #[test]
     fn with_and_without_same_capability_conflicts() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(capability(PolicyOperator::With, "network"), &mut ctx).is_ok());
-        assert!(apply(capability(PolicyOperator::Without, "network"), &mut ctx).is_err());
+        assert!(apply_ok(capability(PolicyOperator::With, "network"), &mut ctx).is_ok());
+        assert!(apply_ok(capability(PolicyOperator::Without, "network"), &mut ctx).is_err());
     }
 
     #[test]
     fn prefer_cannot_override_existing_without() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(capability(PolicyOperator::Without, "gpu"), &mut ctx).is_ok());
-        assert!(apply(capability(PolicyOperator::Prefer, "gpu"), &mut ctx).is_err());
+        assert!(apply_ok(capability(PolicyOperator::Without, "agent-remote"), &mut ctx).is_ok());
+        assert!(apply_ok(capability(PolicyOperator::Prefer, "agent-remote"), &mut ctx).is_err());
     }
 
     #[test]
     fn without_cannot_be_added_after_prefer_for_same_capability() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(capability(PolicyOperator::Prefer, "gpu"), &mut ctx).is_ok());
-        assert!(apply(capability(PolicyOperator::Without, "gpu"), &mut ctx).is_err());
+        assert!(apply_ok(capability(PolicyOperator::Prefer, "agent-remote"), &mut ctx).is_ok());
+        assert!(apply_ok(capability(PolicyOperator::Without, "agent-remote"), &mut ctx).is_err());
     }
 
     #[test]
     fn prefer_and_dodge_same_capability_conflicts() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(capability(PolicyOperator::Prefer, "gpu"), &mut ctx).is_ok());
-        assert!(apply(capability(PolicyOperator::Dodge, "gpu"), &mut ctx).is_err());
+        assert!(apply_ok(capability(PolicyOperator::Prefer, "agent-remote"), &mut ctx).is_ok());
+        assert!(apply_ok(capability(PolicyOperator::Dodge, "agent-remote"), &mut ctx).is_err());
     }
 
     #[test]
     fn independent_capabilities_do_not_conflict() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(capability(PolicyOperator::With, "network"), &mut ctx).is_ok());
-        assert!(apply(capability(PolicyOperator::Without, "gpu"), &mut ctx).is_ok());
+        assert!(apply_ok(capability(PolicyOperator::With, "network"), &mut ctx).is_ok());
+        assert!(apply_ok(capability(PolicyOperator::Without, "agent-remote"), &mut ctx).is_ok());
     }
 
     #[test]
     fn spend_then_save_same_resource_conflicts() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(quotas(PolicyOperator::Spend, &[(10, "RAM")]), &mut ctx).is_ok());
-        assert!(apply(quotas(PolicyOperator::Save, &[(10, "RAM")]), &mut ctx).is_err());
+        assert!(apply_ok(quotas(PolicyOperator::Spend, &[(10, "RAM")]), &mut ctx).is_ok());
+        assert!(apply_ok(quotas(PolicyOperator::Save, &[(10, "RAM")]), &mut ctx).is_err());
     }
 
     #[test]
     fn filter_suggestions_drops_schedule_after_established() {
         let mut ctx = PolicyContext::new();
-        apply(schedule(PolicyOperator::Concurrently), &mut ctx).unwrap();
+        apply_ok(schedule(PolicyOperator::Concurrently), &mut ctx).unwrap();
         let filtered = ctx.filter_suggestions(vec!["CONCURRENTLY".into(), "CONSECUTIVELY".into(), "WITH".into()]);
         assert_eq!(filtered, vec!["WITH".to_string()]);
     }
@@ -363,23 +414,23 @@ mod tests {
     #[test]
     fn spend_out_of_range_percent_rejected() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(quotas(PolicyOperator::Spend, &[(0, "CPU")]), &mut ctx).is_err());
-        assert!(apply(quotas(PolicyOperator::Spend, &[(101, "CPU")]), &mut ctx).is_err());
-        assert!(apply(quotas(PolicyOperator::Spend, &[(150, "CPU")]), &mut ctx).is_err());
+        assert!(apply_ok(quotas(PolicyOperator::Spend, &[(0, "CPU")]), &mut ctx).is_err());
+        assert!(apply_ok(quotas(PolicyOperator::Spend, &[(101, "CPU")]), &mut ctx).is_err());
+        assert!(apply_ok(quotas(PolicyOperator::Spend, &[(150, "CPU")]), &mut ctx).is_err());
     }
 
     #[test]
     fn save_out_of_range_percent_rejected() {
         let mut ctx = PolicyContext::new();
-        assert!(apply(quotas(PolicyOperator::Save, &[(0, "RAM")]), &mut ctx).is_err());
-        assert!(apply(quotas(PolicyOperator::Save, &[(200, "RAM")]), &mut ctx).is_err());
+        assert!(apply_ok(quotas(PolicyOperator::Save, &[(0, "RAM")]), &mut ctx).is_err());
+        assert!(apply_ok(quotas(PolicyOperator::Save, &[(200, "RAM")]), &mut ctx).is_err());
     }
 
     #[test]
     fn resource_budget_translates_spend_directly_and_save_as_the_complement() {
         let mut ctx = PolicyContext::new();
-        apply(quotas(PolicyOperator::Spend, &[(40, "CPU")]), &mut ctx).unwrap();
-        apply(quotas(PolicyOperator::Save, &[(10, "RAM")]), &mut ctx).unwrap();
+        apply_ok(quotas(PolicyOperator::Spend, &[(40, "CPU")]), &mut ctx).unwrap();
+        apply_ok(quotas(PolicyOperator::Save, &[(10, "RAM")]), &mut ctx).unwrap();
 
         let budget = ctx.resource_budget();
 
@@ -391,7 +442,7 @@ mod tests {
     #[test]
     fn resource_budget_reports_unrecognized_resources_instead_of_dropping_them() {
         let mut ctx = PolicyContext::new();
-        apply(quotas(PolicyOperator::Spend, &[(50, "GPU")]), &mut ctx).unwrap();
+        apply_ok(quotas(PolicyOperator::Spend, &[(50, "GPU")]), &mut ctx).unwrap();
 
         let budget = ctx.resource_budget();
 
@@ -403,5 +454,37 @@ mod tests {
     fn resource_budget_is_empty_with_no_quotas_stated() {
         let ctx = PolicyContext::new();
         assert!(ctx.resource_budget().is_empty());
+    }
+
+    #[test]
+    fn without_forbids_exactly_the_named_capability() {
+        let mut ctx = PolicyContext::new();
+        apply_ok(capability(PolicyOperator::Without, "network"), &mut ctx).unwrap();
+        assert_eq!(ctx.denied(), vec![Capability::Network]);
+        assert_eq!(ctx.resource_budget().denied, vec![Capability::Network]);
+        assert!(ctx.authorize("RUN", &[Capability::ProcessSpawn]).is_ok());
+        let err = ctx.authorize("TELL", &[Capability::ProcessSpawn, Capability::Network]).unwrap_err();
+        assert!(err.contains("WITHOUT network"), "{err}");
+    }
+
+    #[test]
+    fn with_is_refused_when_the_probe_says_unavailable() {
+        let mut ctx = PolicyContext::new();
+        let unavailable = |_: Capability| Err("no default route".to_string());
+        let err = apply(capability(PolicyOperator::With, "network"), &mut ctx, &unavailable).unwrap_err();
+        assert!(err.message.contains("no default route"));
+        // Nothing was recorded: a refused WITH does not linger.
+        assert!(apply_ok(capability(PolicyOperator::Without, "network"), &mut ctx).is_ok());
+    }
+
+    #[test]
+    fn standalone_when_is_never_recorded() {
+        let mut ctx = PolicyContext::new();
+        let stmt = PolicyStatement {
+            operator: PolicyOperator::When,
+            operator_span: Span::default(),
+            args: PolicyArgs::Condition { text: "it rains".into(), span: Span::default() },
+        };
+        assert!(apply_ok(stmt, &mut ctx).is_err());
     }
 }

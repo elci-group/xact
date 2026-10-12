@@ -337,6 +337,70 @@ impl PolicyOperator {
     }
 }
 
+/// The closed capability vocabulary `WITH`/`WITHOUT`/`PREFER`/`DODGE`
+/// name (spec section 8). Closed on purpose: a capability Xact cannot
+/// interpret cannot be enforced, so naming one is a grammatical error
+/// rather than a silently-ignored policy (XACT_COMPLETION_DIRECTIVE.md
+/// principle P1, fail closed). This list is the single place the
+/// vocabulary is written down; the parser, completion, the policy engine,
+/// and the planner's per-operation requirements all read it from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Capability {
+    /// Off-host network access. Under `WITHOUT network`, every process an
+    /// executed command spawns (`bank`, `gls`/`bat`, `RUN`, `bound`, CLI
+    /// harnesses) runs in a private, unconnected network namespace, and
+    /// network-backed agents are refused before any request is made. The
+    /// one exception is `ollama run`, which only reaches the local daemon
+    /// over loopback (see `xact-tell`); live completion's own directory
+    /// listings are not executions and are not isolated.
+    Network,
+    /// Launching an external program (every tool-backed verb, `RUN`, and
+    /// process-backed agents).
+    ProcessSpawn,
+    /// Creating or modifying filesystem objects (`CREATE`, `COPY`,
+    /// `MOVE`, `BOUND ... to`, `POPULATING`, and `RUN`, whose writes Xact
+    /// cannot confine).
+    FilesystemWrite,
+    /// Writing to the desktop clipboard (`BOUND` with no destination).
+    Clipboard,
+    /// A model served on this machine (Ollama).
+    AgentLocal,
+    /// A model reached over the network through a provider API.
+    AgentRemote,
+    /// A CLI agent harness (`claude -p`, `gemini -p`, ...) with its own
+    /// tool access.
+    AgentTools,
+}
+
+impl Capability {
+    pub const ALL: [Capability; 7] = [
+        Capability::Network,
+        Capability::ProcessSpawn,
+        Capability::FilesystemWrite,
+        Capability::Clipboard,
+        Capability::AgentLocal,
+        Capability::AgentRemote,
+        Capability::AgentTools,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Capability::Network => "network",
+            Capability::ProcessSpawn => "process-spawn",
+            Capability::FilesystemWrite => "filesystem-write",
+            Capability::Clipboard => "clipboard",
+            Capability::AgentLocal => "agent-local",
+            Capability::AgentRemote => "agent-remote",
+            Capability::AgentTools => "agent-tools",
+        }
+    }
+
+    /// Case-insensitive, matching how every other keyword is written.
+    pub fn parse(s: &str) -> Option<Self> {
+        Capability::ALL.into_iter().find(|c| c.as_str().eq_ignore_ascii_case(s))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceQuota {
     pub percent: u32,
@@ -368,13 +432,25 @@ pub struct ResourceBudget {
     /// before the workload begins" — rather than running unconstrained
     /// while pretending the stated policy was honoured.
     pub unenforceable: Vec<String>,
+    /// Capabilities the session's `! WITHOUT` statements forbid. Carried
+    /// alongside the quotas because it travels the same path to the same
+    /// adapters: `xact-resource` turns a denied [`Capability::Network`]
+    /// into a private network namespace for every spawned process, and
+    /// `xact-tell` refuses agent backends whose tier is denied before
+    /// making any request.
+    pub denied: Vec<Capability>,
 }
 
 impl ResourceBudget {
-    /// No constraint at all — nothing stated, or everything named was
-    /// already accounted for as CPU/RAM.
+    /// No resource *quota* at all — nothing stated, or everything named
+    /// was already accounted for as CPU/RAM. Deliberately ignores
+    /// [`ResourceBudget::denied`]: a capability denial needs no cgroup.
     pub fn is_empty(&self) -> bool {
         self.cpu_percent.is_none() && self.ram_percent.is_none() && self.unenforceable.is_empty()
+    }
+
+    pub fn denies(&self, capability: Capability) -> bool {
+        self.denied.contains(&capability)
     }
 }
 

@@ -276,6 +276,99 @@ pub fn anchor_my_default(path: &str, domain: OwnershipKind, home_relative_defaul
     }
 }
 
+/// Where `~` and bare relative paths point for each owner (spec section
+/// 10; decision D-3 in `XACT_COMPLETION_DIRECTIVE.md`): `MY` → `$HOME`,
+/// `OUR` → the shared root configured by `XACT_OUR_ROOT`, `THEIR` → the
+/// home directory of the user declared by `£ THEY are "..."`. Built by
+/// `xact-semantic`'s identity context and passed to everything that turns
+/// an owned path into a real one, so validation, planning, and completion
+/// all agree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnerRoots {
+    pub our: Option<PathBuf>,
+    /// `(user name, home directory)` for every declared `THEY` member.
+    pub their: Vec<(String, PathBuf)>,
+}
+
+/// The `OUR` root from `XACT_OUR_ROOT`, if it is set to an absolute path.
+/// A relative value is ignored rather than guessed at.
+pub fn our_root_from_env() -> Option<PathBuf> {
+    std::env::var_os("XACT_OUR_ROOT").map(PathBuf::from).filter(|path| path.is_absolute())
+}
+
+/// `name`'s home directory from the system user database (NSS, via
+/// `getpwnam_r`), or `None` if no such user exists.
+pub fn user_home(name: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_name = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: `passwd` is plain old data; zeroed is a valid initial value
+    // that getpwnam_r overwrites on success.
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is valid for the call, and `buf`'s length is
+    // passed alongside it.
+    let rc = unsafe { libc::getpwnam_r(c_name.as_ptr(), &mut entry, buf.as_mut_ptr(), buf.len(), &mut result) };
+    if rc != 0 || result.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: on success `pw_dir` points into `buf`, NUL-terminated.
+    let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
+}
+
+/// The root `~` stands for under `kind`, or why there isn't one.
+fn owner_root(kind: OwnershipKind, roots: &OwnerRoots) -> Result<PathBuf, String> {
+    match kind {
+        OwnershipKind::My => {
+            std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "MY paths need $HOME to be set.".to_string())
+        }
+        OwnershipKind::Our => roots
+            .our
+            .clone()
+            .ok_or_else(|| "OUR paths need a shared root: set XACT_OUR_ROOT to an absolute directory.".to_string()),
+        OwnershipKind::Their => match roots.their.as_slice() {
+            [] => Err("THEIR cannot be used before an identity is established (e.g. £ THEY are \"alice\").".into()),
+            [(_, home)] => Ok(home.clone()),
+            members => Err(format!(
+                "THEIR names {} users ({}); operating on several users' resources at once isn't supported yet — \
+                 declare one user with £ THEY are \"...\".",
+                members.len(),
+                members.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        },
+    }
+}
+
+/// Resolves an owned filesystem path (spec section 10) to a real one: an
+/// absolute path is used as written; `~`, `~/...`, and a bare relative path
+/// are anchored at the owner's root (see [`OwnerRoots`]). Not for `RUN`,
+/// whose operand names a program, not a location.
+pub fn resolve_owned_path(path: &str, kind: OwnershipKind, roots: &OwnerRoots) -> Result<PathBuf, String> {
+    if path.starts_with('/') {
+        return Ok(PathBuf::from(path));
+    }
+    let relative = path.strip_prefix("~/").or(if path == "~" { Some("") } else { None }).unwrap_or(path);
+    let root = owner_root(kind, roots)?;
+    Ok(if relative.is_empty() { root } else { root.join(relative) })
+}
+
+/// [`list_path_entries`] for an owned path being typed: `~` lists under the
+/// owner's root (see [`OwnerRoots`]) while candidates keep the `~/` text
+/// the user typed. Empty when the owner has no root.
+pub fn list_owned_path_entries(partial: &str, kind: OwnershipKind, roots: &OwnerRoots) -> Vec<String> {
+    if kind == OwnershipKind::My {
+        return list_path_entries(&anchor_my_default(partial, kind, true));
+    }
+    let anchored =
+        if partial.starts_with('/') || partial.starts_with('~') { partial.to_string() } else { format!("~/{partial}") };
+    match owner_root(kind, roots) {
+        Ok(root) => list_path_entries_under(&anchored, &root),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Real installed binaries whose name starts with `prefix`, searched under
 /// exactly the directories `domain` would use to resolve *one* program
 /// (see [`search_dirs_for`]) — plus `$PATH` itself for `MY`/`THEIR`, since
@@ -323,11 +416,20 @@ pub fn list_binaries(prefix: &str, domain: OwnershipKind) -> Vec<String> {
 /// fabricated listing. Directories get a trailing `/` so the next
 /// keystroke can keep descending.
 pub fn list_path_entries(partial: &str) -> Vec<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    list_path_entries_under(partial, &home)
+}
+
+/// [`list_path_entries`] with `~` standing for `tilde_root`.
+fn list_path_entries_under(partial: &str, tilde_root: &Path) -> Vec<String> {
     let (dir_part, name_prefix) = match partial.rfind('/') {
         Some(idx) => (&partial[..=idx], &partial[idx + 1..]),
         None => ("", partial),
     };
-    let dir = expand_tilde(dir_part);
+    let dir = match dir_part.strip_prefix("~/") {
+        Some(rest) => tilde_root.join(rest),
+        None => PathBuf::from(dir_part),
+    };
     let dir = if dir_part.is_empty() { PathBuf::from(".") } else { dir };
 
     let mut matches: Vec<String> = gls_listing(&dir)
@@ -684,5 +786,56 @@ mod tests {
         assert_eq!(matches, vec![format!("{}/.hidden", dir.display())]);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    fn roots(our: Option<&str>, their: &[(&str, &str)]) -> OwnerRoots {
+        OwnerRoots {
+            our: our.map(PathBuf::from),
+            their: their.iter().map(|(name, home)| (name.to_string(), PathBuf::from(home))).collect(),
+        }
+    }
+
+    #[test]
+    fn our_paths_resolve_under_the_shared_root() {
+        let roots = roots(Some("/srv/team"), &[]);
+        assert_eq!(
+            resolve_owned_path("~/backup", OwnershipKind::Our, &roots).unwrap(),
+            PathBuf::from("/srv/team/backup")
+        );
+        assert_eq!(
+            resolve_owned_path("backup", OwnershipKind::Our, &roots).unwrap(),
+            PathBuf::from("/srv/team/backup")
+        );
+        assert_eq!(resolve_owned_path("~", OwnershipKind::Our, &roots).unwrap(), PathBuf::from("/srv/team"));
+        assert_eq!(resolve_owned_path("/opt/x", OwnershipKind::Our, &roots).unwrap(), PathBuf::from("/opt/x"));
+    }
+
+    #[test]
+    fn our_paths_without_a_configured_root_are_refused_not_guessed() {
+        let err = resolve_owned_path("~/backup", OwnershipKind::Our, &OwnerRoots::default()).unwrap_err();
+        assert!(err.contains("XACT_OUR_ROOT"), "{err}");
+    }
+
+    #[test]
+    fn their_paths_resolve_under_the_declared_users_home() {
+        let roots = roots(None, &[("alice", "/home/alice")]);
+        assert_eq!(
+            resolve_owned_path("~/notes", OwnershipKind::Their, &roots).unwrap(),
+            PathBuf::from("/home/alice/notes")
+        );
+    }
+
+    #[test]
+    fn their_with_several_users_is_refused() {
+        let roots = roots(None, &[("alice", "/home/alice"), ("bob", "/home/bob")]);
+        let err = resolve_owned_path("~/notes", OwnershipKind::Their, &roots).unwrap_err();
+        assert!(err.contains("alice, bob"), "{err}");
+        assert!(resolve_owned_path("~/notes", OwnershipKind::Their, &OwnerRoots::default()).is_err());
+    }
+
+    #[test]
+    fn user_home_reads_the_real_user_database() {
+        assert_eq!(user_home("root"), Some(PathBuf::from("/root")));
+        assert_eq!(user_home("xact-no-such-user-for-tests"), None);
     }
 }

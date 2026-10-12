@@ -2,9 +2,9 @@
 //! into a semantic intent. Agents "shall produce semantic intents rather
 //! than directly receiving unrestricted shell access" — this crate is
 //! exactly that boundary. The Xact policy engine remains authoritative
-//! over whatever a planner later does with an accepted intent (still a
-//! stub in `xact-planner`); this crate does not dispatch to any actual
-//! agent provider.
+//! over what happens to an accepted intent: `xact-planner::plan_agent`
+//! plans it, and `xact-tell`/`xact-team` run it, refusing any backend tier
+//! the active policy forbids. This crate itself dispatches nothing.
 //!
 //! `READING`/`POPULATING` clauses carry an [`xact_ast::Operand`], the same
 //! type imperative commands use, so they get the same ownership/reference
@@ -33,7 +33,7 @@ pub fn validate(
     for clause in &block.clauses {
         match clause {
             AgentClause::Reading { operand, .. } | AgentClause::Populating { operand, .. } => {
-                check_operand(Some(operand), identity, references, &mut diagnostics);
+                check_operand(Some(operand), true, identity, references, &mut diagnostics);
             }
             AgentClause::Be { .. } | AgentClause::Think { .. } => {}
         }
@@ -83,7 +83,8 @@ mod tests {
     fn populating_that_resolves_against_reference_context() {
         let identity = IdentityContext::new();
         let mut references = ReferenceContext::new();
-        references.record(xact_reference::ResolvedObject::Path("~/project/review".into()));
+        let review = xact_reference::ResolvedObject::Path("/home/u/project/review".into());
+        references.record(review.clone(), review);
         let block = block_with_clauses(vec![AgentClause::Populating {
             operand: Operand::Reference { kind: ReferenceKind::That, span: Span::default() },
             span: Span::default(),

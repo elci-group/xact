@@ -13,6 +13,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xact_ast::ResourceBudget;
+
 #[derive(Debug)]
 pub struct BankError(String);
 
@@ -25,10 +27,15 @@ impl fmt::Display for BankError {
 impl std::error::Error for BankError {}
 
 /// Runs `bank -p <path>`, establishing the filesystem object at `path`
-/// (a file or a directory — `bank` decides which from the path shape).
-pub fn establish(path: &Path) -> Result<PathBuf, BankError> {
-    let output =
-        Command::new("bank").arg("-p").arg(path).output().map_err(|e| BankError(format!("failed to run bank: {e}")))?;
+/// (a file or a directory — `bank` decides which from the path shape),
+/// under `budget`'s quotas and capability denials like every other process
+/// an executed command spawns (see `xact-resource`).
+pub fn establish(path: &Path, budget: &ResourceBudget) -> Result<PathBuf, BankError> {
+    let mut command = Command::new("bank");
+    command.arg("-p").arg(path);
+    let _resource_guard = xact_resource::apply(&mut command, budget)
+        .map_err(|err| BankError(format!("cannot honour the active resource policy: {err}")))?;
+    let output = command.output().map_err(|e| BankError(format!("failed to run bank: {e}")))?;
 
     if output.status.success() {
         Ok(path.to_path_buf())
@@ -49,7 +56,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let target = dir.join("a/b/c/file.txt");
 
-        let result = establish(&target);
+        let result = establish(&target, &ResourceBudget::default());
 
         assert!(result.is_ok(), "bank should succeed: {result:?}");
         assert!(target.is_file());
@@ -64,7 +71,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let target = dir.join("project/");
 
-        let result = establish(&target);
+        let result = establish(&target, &ResourceBudget::default());
 
         assert!(result.is_ok(), "bank should succeed: {result:?}");
         assert!(dir.join("project").is_dir());

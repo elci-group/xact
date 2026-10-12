@@ -130,7 +130,7 @@ where
 
     let report = render_report(&responses);
     if let Some(destination) = &request.populating {
-        xact_bank::establish(destination)
+        xact_bank::establish(destination, &xact_tell::isolation_only(budget))
             .map_err(|err| TeamError(format!("failed to establish {}: {err}", destination.display())))?;
         std::fs::write(destination, &report)
             .map_err(|err| TeamError(format!("failed to write {}: {err}", destination.display())))?;

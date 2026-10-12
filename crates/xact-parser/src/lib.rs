@@ -11,9 +11,9 @@
 //! report "not supported yet".
 
 use xact_ast::{
-    AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Command, IdentityDeclaration, ImperativeCommand, Line,
-    Operand, OwnershipKind, PolicyArgKind, PolicyArgs, PolicyOperator, PolicyStatement, ReferenceKind, ResourceQuota,
-    Span, Verb,
+    AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Capability, Command, IdentityDeclaration, ImperativeCommand,
+    Line, Operand, OwnershipKind, PolicyArgKind, PolicyArgs, PolicyOperator, PolicyStatement, ReferenceKind,
+    ResourceQuota, Span, Verb,
 };
 use xact_diagnostics::Diagnostic;
 use xact_lexer::{tokenize, Token, TokenKind};
@@ -51,8 +51,18 @@ fn operand_expected() -> Vec<String> {
         .collect()
 }
 
+/// Every policy operator the grammar accepts after `!`. `WHEN` is
+/// deliberately absent: a standalone `! WHEN <condition>` has no condition
+/// language Xact can evaluate, so accepting it would record a policy that
+/// is never enforced (XACT_COMPLETION_DIRECTIVE.md principle P1). The
+/// command-level `£ ... WHEN THIS/THAT SUCCEEDS|FAILS` clause is the
+/// enforced form; see [`parse_policy`].
 fn policy_operator_expected() -> Vec<String> {
-    PolicyOperator::ALL.iter().map(|op| op.as_str().to_string()).collect()
+    PolicyOperator::ALL.iter().filter(|op| **op != PolicyOperator::When).map(|op| op.as_str().to_string()).collect()
+}
+
+fn capability_expected() -> Vec<String> {
+    Capability::ALL.iter().map(|c| c.as_str().to_string()).collect()
 }
 
 fn agent_verb_expected() -> Vec<String> {
@@ -381,6 +391,13 @@ fn parse_policy(tokens: &[Token], idx: usize) -> ParseOutcome {
         TokenKind::Eof => Diagnostic::incomplete("! requires a policy operator.", tok.span, policy_operator_expected())
             .into_incomplete(),
         TokenKind::Word(w) => match PolicyOperator::parse(&w.to_uppercase()) {
+            Some(PolicyOperator::When) => Diagnostic::invalid(
+                "! WHEN is not supported: Xact has no condition language to enforce it with. \
+                 Attach a dependency to the command instead, e.g. £ RUN 'test' WHEN THAT SUCCEEDS.",
+                tok.span,
+                policy_operator_expected(),
+            )
+            .into_invalid(),
             Some(op) => parse_policy_args(tokens, idx + 1, op, tok.span),
             None => {
                 Diagnostic::invalid(format!("Unknown policy operator '{w}'."), tok.span, policy_operator_expected())
@@ -413,21 +430,29 @@ fn parse_policy_args(tokens: &[Token], idx: usize, op: PolicyOperator, op_span: 
                     return Diagnostic::incomplete(
                         format!("{} requires a capability.", op.as_str()),
                         tok.span,
-                        vec!["<capability>".into()],
+                        capability_expected(),
                     )
                     .into_incomplete()
                 }
-                TokenKind::Word(w) => (w.clone(), tok.span),
-                TokenKind::StringLit(s) => (s.clone(), tok.span),
+                TokenKind::Word(w) | TokenKind::StringLit(w) => (w.clone(), tok.span),
                 _ => {
                     return Diagnostic::invalid(
                         format!("{} requires a capability.", op.as_str()),
                         tok.span,
-                        vec!["<capability>".into()],
+                        capability_expected(),
                     )
                     .into_invalid()
                 }
             };
+            let Some(capability) = Capability::parse(&name) else {
+                return Diagnostic::invalid(
+                    format!("Unknown capability '{name}' — Xact can only enforce the capabilities listed."),
+                    name_span,
+                    capability_expected(),
+                )
+                .into_invalid();
+            };
+            let name = capability.as_str().to_string();
             let after = &tokens[idx + 1];
             if !matches!(after.kind, TokenKind::Eof) {
                 return Diagnostic::invalid("Unexpected input after policy capability.", after.span, vec![])
@@ -961,8 +986,42 @@ mod tests {
     }
 
     #[test]
+    fn unknown_capability_is_rejected_with_the_vocabulary() {
+        match parse_line("! WITHOUT gpu") {
+            ParseOutcome::Invalid(d) => {
+                assert!(d.message.contains("gpu"));
+                assert!(d.expected.contains(&"network".to_string()));
+            }
+            other => panic!("expected invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capability_slot_suggests_the_closed_vocabulary() {
+        match parse_line("! WITHOUT ") {
+            ParseOutcome::Incomplete(d) => {
+                let expected: Vec<String> = Capability::ALL.iter().map(|c| c.as_str().to_string()).collect();
+                assert_eq!(d.expected, expected);
+            }
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn standalone_when_policy_is_rejected_not_silently_accepted() {
+        match parse_line("! WHEN 'it rains'") {
+            ParseOutcome::Invalid(d) => assert!(d.message.contains("WHEN THAT SUCCEEDS")),
+            other => panic!("expected invalid, got {other:?}"),
+        }
+        match parse_line("! ") {
+            ParseOutcome::Incomplete(d) => assert!(!d.expected.contains(&"WHEN".to_string())),
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn policy_with_capability() {
-        let stmt = policy(parse_line("! WITH 'network'"));
+        let stmt = policy(parse_line("! WITH 'Network'"));
         assert_eq!(stmt.operator, PolicyOperator::With);
         match stmt.args {
             PolicyArgs::Capability { name, .. } => assert_eq!(name, "network"),

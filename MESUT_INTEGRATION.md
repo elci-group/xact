@@ -214,6 +214,17 @@
 > accepted and ran a subsequent command, satisfying "SHALL NOT require killing the entire Xact
 > process" for real. Full test suite green.
 >
+> **Update — capability policy is enforced (2026-10-12).** Section 26 requires Xact capability
+> validation before any plan reaches Mesut. `WITH`/`WITHOUT` were previously accepted and then
+> ignored; they are now a closed, enforced vocabulary (`network`, `process-spawn`,
+> `filesystem-write`, `clipboard`, `agent-local`, `agent-remote`, `agent-tools`). `xact-core`
+> rejects a command needing a `WITHOUT`-forbidden capability before accepting it, and the same
+> denial travels in the `ResourceBudget` to the adapters: `xact-resource` runs every spawned
+> process (except `ollama run`) in a private network namespace under `WITHOUT network`, and
+> `xact-tell` refuses agent tiers before reading or sending anything. Mesut itself is still not an
+> authorization boundary — all of this happens before work is submitted to it. See
+> `XACT_COMPLETION_DIRECTIVE.md`'s status log.
+>
 > **Still not implemented, honestly**: Mesut-level cancellation of a `! CONCURRENTLY` branch that
 > is queued but hasn't started yet (only an already-running child process is killed by the above;
 > a branch still waiting in Mesut's admission queue has no OS process to signal, and nothing here

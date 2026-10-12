@@ -54,6 +54,13 @@ use xact_resolve::ResolverKind;
 /// trailing operand is a live path or command name, or once `@ TELL`'s
 /// target is being typed (see the module doc).
 pub fn dynamic_complete(input: &str) -> Vec<String> {
+    dynamic_complete_with(input, &xact_resolve::OwnerRoots::default())
+}
+
+/// [`dynamic_complete`] with the session's ownership roots, so a path typed
+/// after `OUR`/`THEIR` lists entries under that owner's real root — the
+/// same roots `xact-semantic` and `xact-planner` resolve it against.
+pub fn dynamic_complete_with(input: &str, roots: &xact_resolve::OwnerRoots) -> Vec<String> {
     if input.is_empty() || input.ends_with(char::is_whitespace) {
         return Vec::new();
     }
@@ -78,11 +85,9 @@ pub fn dynamic_complete(input: &str) -> Vec<String> {
             } else if resolvers.contains(&ResolverKind::FilesystemPath) {
                 // Every verb with a filesystem_path resolver is, by
                 // construction, not RUN (see xact-resolve's ontology), so
-                // MY's real default -- a bare relative path anchored at
-                // ~/, same as xact-planner applies at execution time --
-                // always applies here.
-                let anchored = xact_resolve::anchor_my_default(path, *kind, true);
-                xact_resolve::list_path_entries(&anchored)
+                // the owner's root applies here exactly as it does at
+                // execution time.
+                xact_resolve::list_owned_path_entries(path, *kind, roots)
             } else {
                 Vec::new()
             }

@@ -1,37 +1,48 @@
 //! Execution planner (spec section 20): `Command -> ExecutionPlan`, choosing
 //! native vs ELci-tool-backed execution (section 21).
 //!
-//! This is where `Operand`s get resolved into concrete values — expanding
-//! `THIS`/`THAT` against the [`ReferenceContext`] and `~` against `$HOME`
-//! (via `xact-resolve`, the same real path-expansion `xact-cli`'s
-//! autocomplete uses) — completing the `ObjectRef -> ResolvedObject ->
-//! TypedResource` pipeline spec section 11 describes (a resolved path is
-//! as far as "typed" goes so far; there is no filesystem-vs-process
-//! distinction yet).
+//! This is where `Operand`s get resolved into concrete locations: owned
+//! paths through `xact_resolve::resolve_owned_path` against the session's
+//! [`OwnerRoots`] (`MY` → `$HOME`, `OUR` → `XACT_OUR_ROOT`, `THEIR` → the
+//! declared user's home), and `THIS`/`THAT` against the [`ReferenceContext`]
+//! the command was validated in. A resolved path is as far as spec section
+//! 11's `TypedResource` goes so far; there is no file-vs-process typing yet.
 //!
-//! Scope so far: `CREATE` maps to the `bank` tool, `SEE` maps to `gls`
-//! (directories) or `bat` (files), `RUN` maps to native process
-//! execution, and `BOUND` maps to the `bound` tool — per section 21's
-//! table (the verb is the language-level intent; the tool, or "no tool,
-//! do it natively", is the execution backend the planner happens to
-//! choose for it — spec section 6/13's Xact-owns-intent,
-//! tool-owns-implementation split). Unlike `CREATE`, where one tool
-//! handles both files and directories internally, `SEE` has no single
-//! tool covering both — so the planner itself inspects the resolved path
-//! on disk to route to one or the other. Every other imperative verb,
-//! and identity declarations, are reported as [`PlanOutcome::Unsupported`]
+//! Verb → backend, per section 21's table (the verb is the language-level
+//! intent; the tool, or "do it natively", is the backend the planner picks
+//! — spec section 6/13's Xact-owns-intent, tool-owns-implementation split):
+//! `CREATE` → `bank`; `SEE` → `gls` (directories) or `bat` (files), chosen
+//! by inspecting the resolved path; `RUN` → native process execution;
+//! `BOUND` → `bound`; `COPY`/`MOVE` → Xact's narrow native transfer adapter
+//! (no ELci tool owns generic copy/move). `EDIT`, `PASTE`, `CUT`, `DELETE`,
+//! and identity declarations are reported as [`PlanOutcome::Unsupported`]
 //! — not silently dropped.
 //!
-//! [`plan_agent`] is the equivalent entry point for `@` blocks (spec
-//! section 9; Xact–Mesut Integration Phase 7's `AgentIntent -> Capability
-//! validation -> ExecutionPlan` pipeline): only `TELL` has a plan so far
-//! (`TEAM` is reported unsupported, same as any other not-yet-implemented
-//! verb) — see `crates/xact-tell/src/lib.rs` for the real execution side.
+//! [`plan_agent`] is the equivalent entry point for `@` blocks: `TELL`
+//! dispatches one backend (`xact-tell`), `TEAM` a roster (`xact-team`).
+//!
+//! [`required_capabilities`]/[`required_agent_capabilities`] state which
+//! policy capabilities each operation needs, so `xact-core` can enforce
+//! `! WITHOUT` before a command is accepted (spec section 19).
 
 use std::path::PathBuf;
 
-use xact_ast::{AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Command, Operand, OwnershipKind};
+use xact_ast::{
+    AgentBlock, AgentClause, AgentClauseKind, AgentVerb, Capability, Command, Operand, OwnershipKind, Verb,
+};
 use xact_reference::{ReferenceContext, ResolvedObject};
+pub use xact_resolve::OwnerRoots;
+
+/// Resolves an operand to a real location, or returns `Unsupported` with
+/// the reason from the enclosing planning function.
+macro_rules! locate {
+    ($raw:expr, $operand:expr, $roots:expr) => {
+        match locate($raw, $operand, $roots) {
+            Ok(path) => path,
+            Err(reason) => return PlanOutcome::Unsupported(reason),
+        }
+    };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionPlan {
@@ -107,7 +118,7 @@ pub enum PlanOutcome {
     Unsupported(String),
 }
 
-pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
+pub fn plan(command: &Command, references: &ReferenceContext, roots: &OwnerRoots) -> PlanOutcome {
     let Command::Imperative(cmd) = command else {
         return PlanOutcome::Unsupported("THEY declarations establish identity but have no execution plan.".into());
     };
@@ -118,7 +129,7 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
                 return PlanOutcome::Unsupported("CREATE requires a target.".into());
             };
             match resolve_path(operand, references) {
-                Some(path) => PlanOutcome::Plan(ExecutionPlan::Bank { path: resolve_my_default_path(&path, operand) }),
+                Some(path) => PlanOutcome::Plan(ExecutionPlan::Bank { path: locate!(&path, operand, roots) }),
                 None => PlanOutcome::Unsupported("CREATE's target did not resolve to a path.".into()),
             }
         }
@@ -128,7 +139,7 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             match resolve_path(operand, references) {
                 Some(raw) => {
-                    let path = resolve_my_default_path(&raw, operand);
+                    let path = locate!(&raw, operand, roots);
                     if path.is_dir() {
                         PlanOutcome::Plan(ExecutionPlan::ViewDirectory { path })
                     } else if path.is_file() {
@@ -163,15 +174,12 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
             };
             let destination = match &cmd.destination {
                 Some(dest_operand) => match resolve_path(dest_operand, references) {
-                    Some(raw) => Some(resolve_my_default_path(&raw, dest_operand)),
+                    Some(raw) => Some(locate!(&raw, dest_operand, roots)),
                     None => return PlanOutcome::Unsupported("BOUND's destination did not resolve to a path.".into()),
                 },
                 None => None,
             };
-            PlanOutcome::Plan(ExecutionPlan::Bound {
-                source: resolve_my_default_path(&raw_source, operand),
-                destination,
-            })
+            PlanOutcome::Plan(ExecutionPlan::Bound { source: locate!(&raw_source, operand, roots), destination })
         }
         xact_ast::Verb::Copy | xact_ast::Verb::Move => {
             let Some(source) = cmd.operand.as_ref().and_then(|operand| resolve_path(operand, references)) else {
@@ -189,8 +197,8 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
                     cmd.verb.as_str()
                 ));
             };
-            let source = resolve_my_default_path(&source, cmd.operand.as_ref().unwrap());
-            let destination = resolve_my_default_path(&destination, destination_operand);
+            let source = locate!(&source, cmd.operand.as_ref().unwrap(), roots);
+            let destination = locate!(&destination, destination_operand, roots);
             match cmd.verb {
                 xact_ast::Verb::Copy => PlanOutcome::Plan(ExecutionPlan::Copy { source, destination }),
                 xact_ast::Verb::Move => PlanOutcome::Plan(ExecutionPlan::Move { source, destination }),
@@ -204,7 +212,7 @@ pub fn plan(command: &Command, references: &ReferenceContext) -> PlanOutcome {
 /// `AgentBlock -> ExecutionPlan` (spec section 9; Xact–Mesut Integration
 /// Phase 7). `TELL` dispatches one provider; `TEAM` delegates roster
 /// orchestration to `xact-team` while retaining the same validated clauses.
-pub fn plan_agent(block: &AgentBlock, references: &ReferenceContext) -> PlanOutcome {
+pub fn plan_agent(block: &AgentBlock, references: &ReferenceContext, roots: &OwnerRoots) -> PlanOutcome {
     let persona = match block.clause(AgentClauseKind::Be) {
         Some(AgentClause::Be { persona, .. }) => Some(persona.clone()),
         _ => None,
@@ -216,14 +224,14 @@ pub fn plan_agent(block: &AgentBlock, references: &ReferenceContext) -> PlanOutc
 
     let reading = match block.clause(AgentClauseKind::Reading) {
         Some(AgentClause::Reading { operand, .. }) => match resolve_path(operand, references) {
-            Some(raw) => Some(resolve_my_default_path(&raw, operand)),
+            Some(raw) => Some(locate!(&raw, operand, roots)),
             None => return PlanOutcome::Unsupported("TELL's READING target did not resolve to a path.".into()),
         },
         _ => None,
     };
     let populating = match block.clause(AgentClauseKind::Populating) {
         Some(AgentClause::Populating { operand, .. }) => match resolve_path(operand, references) {
-            Some(raw) => Some(resolve_my_default_path(&raw, operand)),
+            Some(raw) => Some(locate!(&raw, operand, roots)),
             None => return PlanOutcome::Unsupported("TELL's POPULATING target did not resolve to a path.".into()),
         },
         _ => None,
@@ -273,18 +281,56 @@ fn ownership_domain(operand: &Operand) -> OwnershipKind {
 }
 
 /// Every verb this function is called from is a real filesystem target
-/// (`CREATE`/`SEE`/`BOUND`/`TELL`'s `READING`/`POPULATING`) — `RUN` never
-/// calls this at all (its `command_line` is used exactly as resolved,
-/// with no tilde expansion, since it names a `$PATH`-searched program,
-/// not a location — see `xact-process`), which is exactly the "everything
-/// except RUN" boundary `xact_resolve::anchor_my_default` expects. `raw`
-/// is `resolve_path(operand, ..)`'s already-resolved string (an `Owned`
-/// operand's literal path, a `StringArg`'s literal text, or a `THIS`/
-/// `THAT` reference's previously-established — and so already anchored —
-/// path).
-fn resolve_my_default_path(raw: &str, operand: &Operand) -> PathBuf {
-    let anchored = xact_resolve::anchor_my_default(raw, ownership_domain(operand), true);
-    xact_resolve::expand_tilde(&anchored)
+/// (`CREATE`/`SEE`/`BOUND`/`COPY`/`MOVE`/`TELL`'s `READING`/`POPULATING`) —
+/// `RUN` never calls this (its `command_line` names a `$PATH`-searched
+/// program, not a location). An owned operand resolves through
+/// `xact_resolve::resolve_owned_path` against the owner's root (spec
+/// section 10, decision D-3); a `THIS`/`THAT` reference already carries the
+/// absolute path `xact-semantic` resolved when it was established; a bare
+/// string defaults to `MY`.
+fn locate(raw: &str, operand: &Operand, roots: &OwnerRoots) -> Result<PathBuf, String> {
+    match operand {
+        Operand::Owned { kind, .. } => xact_resolve::resolve_owned_path(raw, *kind, roots),
+        Operand::Reference { .. } | Operand::StringArg { .. } => {
+            let anchored = xact_resolve::anchor_my_default(raw, ownership_domain(operand), true);
+            Ok(xact_resolve::expand_tilde(&anchored))
+        }
+    }
+}
+
+/// The capabilities an imperative command needs, known before planning
+/// (spec section 19's capability validation level): `xact-core` checks
+/// these against `! WITHOUT` before the command is even accepted, so a
+/// forbidden operation is rejected as part of validation, never partway
+/// through a block. `RUN` needs `filesystem-write` because Xact cannot yet
+/// confine what an arbitrary program writes; it does *not* need `network`,
+/// because under `WITHOUT network` it runs in an isolated network
+/// namespace instead (see `xact-resource`). Network-backed agent tiers are
+/// enforced where the backend is resolved, in `xact-tell`.
+pub fn required_capabilities(command: &Command) -> Vec<Capability> {
+    let Command::Imperative(cmd) = command else {
+        return Vec::new();
+    };
+    match cmd.verb {
+        Verb::See => vec![Capability::ProcessSpawn],
+        Verb::Create | Verb::Run => vec![Capability::ProcessSpawn, Capability::FilesystemWrite],
+        Verb::Bound if cmd.destination.is_some() => vec![Capability::ProcessSpawn, Capability::FilesystemWrite],
+        Verb::Bound => vec![Capability::ProcessSpawn, Capability::Clipboard],
+        Verb::Copy | Verb::Move | Verb::Edit | Verb::Paste | Verb::Cut | Verb::Delete => {
+            vec![Capability::FilesystemWrite]
+        }
+    }
+}
+
+/// [`required_capabilities`] for an `@` block: writing `POPULATING` needs
+/// `filesystem-write`. Which agent tier (`agent-local`/`-remote`/`-tools`)
+/// the target needs is only known once the backend is resolved, so
+/// `xact-tell` enforces that before it reads or sends anything.
+pub fn required_agent_capabilities(block: &AgentBlock) -> Vec<Capability> {
+    match block.clause(AgentClauseKind::Populating) {
+        Some(_) => vec![Capability::FilesystemWrite],
+        None => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -330,7 +376,7 @@ mod tests {
                 path: "~/project/src/main.rs".into(),
                 span: Span::default(),
             });
-            match plan(&cmd, &references) {
+            match plan(&cmd, &references, &OwnerRoots::default()) {
                 PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
                     assert_eq!(path, PathBuf::from("/home/testuser/project/src/main.rs"));
                 }
@@ -352,7 +398,7 @@ mod tests {
                 path: "project/src/main.rs".into(),
                 span: Span::default(),
             });
-            match plan(&cmd, &references) {
+            match plan(&cmd, &references, &OwnerRoots::default()) {
                 PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
                     assert_eq!(path, PathBuf::from("/home/testuser/project/src/main.rs"));
                 }
@@ -361,22 +407,31 @@ mod tests {
         });
     }
 
-    /// `OUR` and `THEIR` never get the `MY`-only home default — a bare
-    /// relative path under either stays relative to Xact's own working
-    /// directory, unchanged from before this default existed.
+    /// `OUR` and `THEIR` never get the `MY` home default: a bare relative
+    /// path anchors at their own root (the shared `OUR` root, the declared
+    /// user's home), and with no such root it is refused rather than
+    /// silently resolved against Xact's working directory.
     #[test]
-    fn our_and_their_are_not_anchored_at_home() {
+    fn our_and_their_anchor_at_their_own_roots_never_home() {
         with_test_home("/home/testuser", || {
             let references = ReferenceContext::new();
-            for kind in [OwnershipKind::Our, OwnershipKind::Their] {
+            let roots = OwnerRoots {
+                our: Some(PathBuf::from("/srv/team")),
+                their: vec![("alice".into(), PathBuf::from("/home/alice"))],
+            };
+            for (kind, expected) in [
+                (OwnershipKind::Our, "/srv/team/project/README.md"),
+                (OwnershipKind::Their, "/home/alice/project/README.md"),
+            ] {
                 let cmd =
                     create_command(Operand::Owned { kind, path: "project/README.md".into(), span: Span::default() });
-                match plan(&cmd, &references) {
+                match plan(&cmd, &references, &roots) {
                     PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
-                        assert_eq!(path, PathBuf::from("project/README.md"), "{kind:?}");
+                        assert_eq!(path, PathBuf::from(expected), "{kind:?}")
                     }
                     other => panic!("expected a bank plan for {kind:?}, got {other:?}"),
                 }
+                assert!(matches!(plan(&cmd, &references, &OwnerRoots::default()), PlanOutcome::Unsupported(_)));
             }
         });
     }
@@ -389,7 +444,7 @@ mod tests {
             path: "/tmp/project/".into(),
             span: Span::default(),
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
                 assert_eq!(path, PathBuf::from("/tmp/project/"));
             }
@@ -400,9 +455,10 @@ mod tests {
     #[test]
     fn create_with_reference_resolves_from_context() {
         let mut references = ReferenceContext::new();
-        references.record(ResolvedObject::Path("/tmp/from-reference".into()));
+        let object = ResolvedObject::Path("/tmp/from-reference".into());
+        references.record(object.clone(), object);
         let cmd = create_command(Operand::Reference { kind: ReferenceKind::That, span: Span::default() });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Bank { path }) => {
                 assert_eq!(path, PathBuf::from("/tmp/from-reference"));
             }
@@ -420,7 +476,7 @@ mod tests {
             destination: None,
             dependency: None,
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Unsupported(reason) => assert!(reason.contains("DELETE")),
             other => panic!("expected unsupported, got {other:?}"),
         }
@@ -436,7 +492,7 @@ mod tests {
             destination: None,
             dependency: None,
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain }) => {
                 assert_eq!(command_line, "true");
                 assert_eq!(
@@ -452,7 +508,8 @@ mod tests {
     #[test]
     fn run_resolves_reference_operand_to_a_command_line() {
         let mut references = ReferenceContext::new();
-        references.record(ResolvedObject::Text("echo hi".into()));
+        let object = ResolvedObject::Text("echo hi".into());
+        references.record(object.clone(), object);
         let cmd = Command::Imperative(ImperativeCommand {
             verb: Verb::Run,
             verb_span: Span::default(),
@@ -460,7 +517,7 @@ mod tests {
             destination: None,
             dependency: None,
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain }) => {
                 assert_eq!(command_line, "echo hi");
                 assert_eq!(
@@ -483,7 +540,7 @@ mod tests {
             destination: None,
             dependency: None,
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Run { command_line, domain }) => {
                 assert_eq!(command_line, "chrome");
                 assert_eq!(domain, OwnershipKind::Our);
@@ -507,7 +564,7 @@ mod tests {
             dependency: None,
         });
         let home = std::env::var("HOME").unwrap();
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Bound { source, destination }) => {
                 assert_eq!(source, PathBuf::from(format!("{home}/project")));
                 assert_eq!(destination, None);
@@ -534,7 +591,7 @@ mod tests {
             }),
             dependency: None,
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Bound { source, destination }) => {
                 assert_eq!(source, PathBuf::from("/tmp/project"));
                 assert_eq!(destination, Some(PathBuf::from("/tmp/bundle.txt")));
@@ -553,7 +610,7 @@ mod tests {
             destination: None,
             dependency: None,
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Unsupported(reason) => assert!(reason.contains("BOUND")),
             other => panic!("expected unsupported, got {other:?}"),
         }
@@ -577,7 +634,7 @@ mod tests {
             path: std::env::temp_dir().display().to_string(),
             span: Span::default(),
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::ViewDirectory { path }) => {
                 assert_eq!(path, std::env::temp_dir());
             }
@@ -596,7 +653,7 @@ mod tests {
             path: file.display().to_string(),
             span: Span::default(),
         });
-        let result = plan(&cmd, &references);
+        let result = plan(&cmd, &references, &OwnerRoots::default());
 
         let _ = std::fs::remove_file(&file);
         match result {
@@ -613,7 +670,7 @@ mod tests {
             path: "/definitely/does/not/exist/xact-test".into(),
             span: Span::default(),
         });
-        match plan(&cmd, &references) {
+        match plan(&cmd, &references, &OwnerRoots::default()) {
             PlanOutcome::Unsupported(reason) => assert!(reason.contains("does not exist")),
             other => panic!("expected unsupported, got {other:?}"),
         }
@@ -635,7 +692,7 @@ mod tests {
     fn tell_with_no_clauses_resolves_to_a_minimal_plan() {
         let references = ReferenceContext::new();
         let block = agent_block(vec![]);
-        match plan_agent(&block, &references) {
+        match plan_agent(&block, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Agent { model, persona, reading, populating, think, instruction }) => {
                 assert_eq!(model, "gemma3");
                 assert_eq!(persona, None);
@@ -672,7 +729,7 @@ mod tests {
             AgentClause::Think { budget: 80, span: Span::default() },
         ]);
 
-        match plan_agent(&block, &references) {
+        match plan_agent(&block, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Agent { persona, reading, populating, think, .. }) => {
                 assert_eq!(persona, Some("a meticulous senior Rust engineer".to_string()));
                 assert_eq!(reading, Some(PathBuf::from(format!("{home}/project"))));
@@ -689,12 +746,43 @@ mod tests {
         let mut block = agent_block(vec![]);
         block.verb = AgentVerb::Team;
         block.target = "gemma3, second-agent".into();
-        match plan_agent(&block, &references) {
+        match plan_agent(&block, &references, &OwnerRoots::default()) {
             PlanOutcome::Plan(ExecutionPlan::Team { roster, instruction, .. }) => {
                 assert_eq!(roster, "gemma3, second-agent");
                 assert_eq!(instruction, "Review this project.");
             }
             other => panic!("expected team plan, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn our_paths_plan_under_the_configured_shared_root() {
+        let roots = OwnerRoots { our: Some(PathBuf::from("/srv/team")), their: Vec::new() };
+        let cmd =
+            create_command(Operand::Owned { kind: OwnershipKind::Our, path: "~/notes".into(), span: Span::default() });
+        match plan(&cmd, &ReferenceContext::new(), &roots) {
+            PlanOutcome::Plan(ExecutionPlan::Bank { path }) => assert_eq!(path, PathBuf::from("/srv/team/notes")),
+            other => panic!("expected a bank plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capability_requirements_follow_the_operation() {
+        let run = Command::Imperative(ImperativeCommand {
+            verb: Verb::Run,
+            verb_span: Span::default(),
+            operand: Some(Operand::StringArg { value: "ls".into(), span: Span::default() }),
+            destination: None,
+            dependency: None,
+        });
+        assert_eq!(required_capabilities(&run), vec![Capability::ProcessSpawn, Capability::FilesystemWrite]);
+        let bound_to_clipboard = Command::Imperative(ImperativeCommand {
+            verb: Verb::Bound,
+            verb_span: Span::default(),
+            operand: Some(Operand::Owned { kind: OwnershipKind::My, path: "~/p".into(), span: Span::default() }),
+            destination: None,
+            dependency: None,
+        });
+        assert!(required_capabilities(&bound_to_clipboard).contains(&Capability::Clipboard));
     }
 }

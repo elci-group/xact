@@ -1,102 +1,58 @@
-//! Minimal REPL: type a `£` command, a `!` policy statement, or an `@`
-//! agent block, get grammatical + semantic validation and a diagnostic if
-//! it fails.
-//!
-//! Once a command is accepted, the CLI plans it (`xact-planner`) and, if a
-//! plan exists, actually runs it (`xact-executor`): `£ CREATE ...` really
-//! creates the file or directory via the real `bank` binary, `£ SEE ...`
-//! really shows it via `gls` (directories) or `bat` (files), `£ RUN ...`
-//! really spawns the process and waits for it to exit, and
-//! `£ BOUND ... to ...` really aggregates a source directory via the real
-//! `bound` binary (Xact–Mesut Integration Phase 6). Every other verb
-//! reports itself unsupported rather than silently doing nothing.
-//!
-//! `@ TELL ...` blocks are planned and executed the same way (Xact–Mesut
-//! Integration Phase 7) — `xact-planner::plan_agent` then
-//! `xact-executor`, exactly parallel to a `£` command's
-//! `xact-planner::plan` then `xact-executor`. `@ TEAM ...` is accepted as
-//! a validated intent but has no execution plan yet, same as any other
-//! unimplemented verb. `dispatch` is the one place both paths funnel
-//! through, since planning and execution are identical from here on.
+//! The Xact shell: an interactive REPL and a non-interactive runner. Type
+//! a `£` command, a `!` policy statement, or an `@` agent block; it is
+//! validated grammatically, semantically, and against the active policy
+//! (`xact-core`), planned (`xact-planner`), and actually run
+//! (`xact-executor`): `£ CREATE` via `bank`, `£ SEE` via `gls`/`bat`,
+//! `£ RUN` as a real process, `£ BOUND` via `bound`, `£ COPY`/`£ MOVE`
+//! natively, and `@ TELL`/`@ TEAM` against real agent backends. `EDIT`,
+//! `PASTE`, `CUT`, and `DELETE` have no execution plan yet and report
+//! themselves unsupported rather than silently doing nothing.
+//! [`dispatch`] is the one place `£` and `@` paths funnel through.
 //!
 //! Scheduling (spec section 23, Xact–Mesut Integration Phase 3): with no
 //! `! CONCURRENTLY`/`! CONSECUTIVELY` stated, or under `! CONSECUTIVELY`,
-//! each accepted command runs and is waited on before the next line is
-//! even read — `A → B`. Once `! CONCURRENTLY` is established for the
-//! session, subsequent commands are instead admitted onto Mesut as
-//! independent branches and not waited on immediately; this is the only
-//! place that distinction is made — `xact-executor` just exposes both a
-//! blocking and a non-blocking way to run a plan; `session.schedule()` is
-//! what tells this loop which one to call.
+//! each accepted command runs and is waited on before the next is read —
+//! `A → B`. Under `! CONCURRENTLY`, subsequent commands are admitted onto
+//! Mesut as independent branches; [`drain_ready`] prints each branch's real
+//! Mesut lifecycle events and outcome as they arrive (Phase 4).
 //!
-//! Terminal state (spec section 20, Xact–Mesut Integration Phase 4): only
-//! `! CONCURRENTLY` branches have anything worth showing between the
-//! semantic "accepted"/outcome lines this loop already prints — a
-//! `CONSECUTIVELY` command blocks until it's done, so there's no gap to
-//! narrate. `drain_ready` prints each branch's real Mesut lifecycle
-//! events (`[description] started on ...`, `completed in Nms`, ...) as
-//! they arrive, ahead of the next prompt; this is Mesut's
-//! execution-oriented telemetry, distinct from — and printed separately
-//! from — Xact's own semantic outcome line for that same branch.
+//! Policy: `session.resource_budget()` carries `SPEND`/`SAVE` quotas
+//! (real cgroup v2 limits, via `xact-resource`) and `WITHOUT`'s denied
+//! capabilities (a private network namespace for spawned processes under
+//! `WITHOUT network`; refused agent tiers) to every execution. Commands
+//! needing a forbidden capability are already rejected by `xact-core`.
+//! `PREFER`/`DODGE` are accepted as advisory, and the CLI says so.
 //!
-//! Resource policy (spec section 22, Xact–Mesut Integration Phase 5):
-//! `session.resource_budget()` resolves the session's accumulated
-//! `SPEND`/`SAVE` statements and is passed to every `execute`/
-//! `execute_concurrent` call — `£ RUN`, `£ BOUND`, and `@ TELL` are
-//! actually constrained by it (real Linux cgroup v2 enforcement, via
-//! `xact-resource`); a run under an active budget that names an
-//! unenforceable resource fails outright rather than running unconstrained.
+//! Dependencies (spec section 9, Phase 8): `£ RUN 'test' WHEN THAT
+//! SUCCEEDS` only runs once the real outcome of whatever most recently ran
+//! satisfies the condition. Under `! CONCURRENTLY` that may be an in-flight
+//! branch: [`LastResult::Pending`] tracks it, and [`resolve_branch_now`]
+//! blocks on that specific branch before deciding. Multi-branch fan-in and
+//! recovery beyond a plain `WHEN ... FAILS` fallback are not implemented —
+//! see `MESUT_INTEGRATION.md`'s Phase 8 status.
 //!
-//! Dependencies (spec section 9, Xact–Mesut Integration Phase 8):
-//! `£ RUN 'test' WHEN THAT SUCCEEDS` only actually plans/executes once
-//! the real outcome of whatever most recently ran satisfies the stated
-//! condition — `session.dependency_satisfied` checks this,
-//! `session.record_outcome` is how it learns each real result, and this
-//! loop is the only place that decides skip-vs-run. Under
-//! `! CONCURRENTLY`, the "most recent" thing might still be an in-flight
-//! branch: `LastResult::Pending(id)` tracks that, and `resolve_branch_now`
-//! blocks on that *specific* branch (not the others, which keep running
-//! independently) the moment a `WHEN` clause needs to know its outcome —
-//! a real wait-then-check gate, not a fabricated instant answer.
-//! Multi-branch fan-in dependencies and recovery constructs beyond a
-//! plain `WHEN ... FAILS` fallback are not implemented — see
-//! `MESUT_INTEGRATION.md`'s Phase 8 status for the honest boundary.
+//! Cancellation (Phase 8, continued): `main` installs a real `CTRL-C`
+//! handler (`xact_cancel::cancel_all`) so an interrupt kills whatever's
+//! running instead of the whole Xact process.
 //!
-//! Cancellation (spec section 12, Xact–Mesut Integration Phase 8,
-//! continued): `main` installs a real `CTRL-C` handler
-//! (`xact_cancel::cancel_all`) so an interrupt kills whatever's actually
-//! running instead of the default "kill the whole Xact process"
-//! disposition. See `xact-cancel`'s module docs for the mechanism.
+//! Interactive input: [`XactValidator`] keeps Enter from submitting a draft
+//! the parser considers incomplete (inserting a newline instead), so a
+//! statement can span several lines; [`XactHighlighter`] paints input the
+//! parser can never complete in red from the offending token onward.
+//! History persists to `~/.local/share/xact/history`, driving `Ctrl-R` and
+//! a `fish`-style inline hint; `--vi` switches to Vi edit mode (without the
+//! live per-keystroke completion overlay built for Emacs mode).
 //!
-//! Multi-line input, interactively: the lexer treats newlines as ordinary
-//! whitespace, so the grammar never cared whether a `£`/`!`/`@` line was
-//! typed on one line or several — only the REPL's line editor used to.
-//! Now it doesn't either: [`XactValidator`] reports a draft as syntactically
-//! incomplete (via `xact_parser::parse_line`) until it's a real, complete
-//! program, and reedline's own Enter handling inserts a newline instead of
-//! submitting for exactly that case — so a `£`/`!`/`@` block can span
-//! several lines with nothing but plain Enter. Shift+Enter always inserts
-//! a literal newline regardless of validity, for forcing a line break by
-//! hand. [`XactHighlighter`] complements this: input the parser can never
-//! complete without changing what's already there (e.g. a line not
-//! starting with `£`/`!`/`@`) is styled red from the offending token
-//! onward instead of being rejected the instant Enter is pressed — the
-//! same [`xact_parser::ParseOutcome::Invalid`] diagnostic just drives
-//! paint instead of an outright bounce. Batch input ([`run_batch`], for
-//! `-c`/a script file — see `parse_args`) has no live line editor to paint
-//! or gate, so it still uses the older explicit continuation rule,
-//! [`accumulate_agent_block`]: once a line starts with `@`, keep reading
-//! lines until a blank one, then submit the joined result as one input.
-//!
-//! History persists to `~/.local/share/xact/history` (`FileBackedHistory`)
-//! and drives both `Ctrl-R` reverse search and a `fish`-style inline hint
-//! of the most recent matching prior line ([`reedline::DefaultHinter`]);
-//! `--vi` switches to `reedline`'s own Vi edit mode, though that mode
-//! doesn't get the live per-keystroke completion overlay
-//! ([`add_completion_keybindings`]) built for Emacs mode's keybinding
-//! shape — Vi mode's completion stays the Tab-triggered default.
+//! Non-interactive input — `xact -c '...'`, `xact script.xact`, or input
+//! piped to `xact` — is one block (spec sections 17/18): [`run_batch`]
+//! splits it into statements ([`split_statements`]), validates *every*
+//! statement against a throwaway copy of the session first
+//! ([`validate_block`]), and runs nothing at all if any is invalid. The
+//! exit status is 0 when every command succeeded, 1 when one did not, and
+//! 2 when the block was rejected before running.
 
 use std::borrow::Cow;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -733,10 +689,10 @@ fn build_line_editor(session: Arc<Mutex<Session>>, vi_mode: bool) -> Reedline {
 /// printed for `£ ...`/`@ ...` when it was queued.
 type PendingBranches = Vec<(u64, String, Pending)>;
 
-/// What `THIS`/`THAT`'s outcome currently refers to, for `WHEN` clauses
-/// (Xact–Mesut Integration Phase 8). Mirrors the language's existing
-/// single-slot `THIS`/`THAT` model (spec section 11) — one "most recent"
-/// tracked thing, not a per-object history.
+/// What the most recent command's outcome currently is, for `WHEN
+/// THIS/THAT` clauses (Xact–Mesut Integration Phase 8): one session-wide
+/// "most recent outcome" slot (a command has one outcome, even though
+/// `THIS`/`THAT` name different objects — see `xact-reference`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LastResult {
     /// The most recent real outcome is already recorded in `Session` —
@@ -749,6 +705,30 @@ enum LastResult {
     Pending(u64),
 }
 
+/// Everything one run of the REPL or a batch tracks between commands.
+struct Runtime {
+    pending: PendingBranches,
+    next_branch_id: u64,
+    last_result: LastResult,
+    /// How many commands did not succeed (rejected, unsupported, failed,
+    /// or a nonzero exit) — batch mode's exit status.
+    failures: usize,
+}
+
+impl Runtime {
+    fn new() -> Self {
+        Self { pending: Vec::new(), next_branch_id: 0, last_result: LastResult::Resolved, failures: 0 }
+    }
+
+    fn record(&mut self, session: &mut Session, outcome: &ExecutionOutcome) {
+        let succeeded = outcome_succeeded(outcome);
+        session.record_outcome(succeeded);
+        if !succeeded {
+            self.failures += 1;
+        }
+    }
+}
+
 /// Prints any lifecycle telemetry and finished outcomes for branches
 /// since the last check, without blocking on the ones still running.
 /// Drains events both before *and* right after checking a branch for
@@ -759,8 +739,9 @@ enum LastResult {
 /// removed from `pending`. Also updates `session`'s recorded outcome
 /// whenever the branch that resolves is the one `last_result` is
 /// currently tracking.
-fn drain_ready(pending: &mut PendingBranches, session: &mut Session, last_result: &mut LastResult) {
-    pending.retain_mut(|(id, description, branch)| {
+fn drain_ready(rt: &mut Runtime, session: &mut Session) {
+    let mut finished = Vec::new();
+    rt.pending.retain_mut(|(id, description, branch)| {
         for event in branch.drain_events() {
             print_lifecycle_event(description, &event);
         }
@@ -770,15 +751,18 @@ fn drain_ready(pending: &mut PendingBranches, session: &mut Session, last_result
                     print_lifecycle_event(description, &event);
                 }
                 print_outcome(Some(description), &outcome);
-                if *last_result == LastResult::Pending(*id) {
-                    session.record_outcome(outcome_succeeded(&outcome));
-                    *last_result = LastResult::Resolved;
-                }
+                finished.push((*id, outcome));
                 false
             }
             None => true,
         }
     });
+    for (id, outcome) in finished {
+        rt.record(session, &outcome);
+        if rt.last_result == LastResult::Pending(id) {
+            rt.last_result = LastResult::Resolved;
+        }
+    }
 }
 
 /// Blocks on one specific branch (identified by `id`) and records its
@@ -787,22 +771,23 @@ fn drain_ready(pending: &mut PendingBranches, session: &mut Session, last_result
 /// Branches other than `id` are left running untouched. A missing `id`
 /// (should not happen — `last_result` only ever names a branch that was
 /// actually queued) is a no-op rather than a panic.
-fn resolve_branch_now(id: u64, pending: &mut PendingBranches, session: &mut Session) {
-    let Some(pos) = pending.iter().position(|(pid, _, _)| *pid == id) else {
+fn resolve_branch_now(id: u64, rt: &mut Runtime, session: &mut Session) {
+    let Some(pos) = rt.pending.iter().position(|(pid, _, _)| *pid == id) else {
         return;
     };
-    let (_, description, mut branch) = pending.remove(pos);
+    let (_, description, mut branch) = rt.pending.remove(pos);
     let outcome = block_until_resolved(&description, &mut branch);
     print_outcome(Some(&description), &outcome);
-    session.record_outcome(outcome_succeeded(&outcome));
+    rt.record(session, &outcome);
 }
 
 /// Blocks until every remaining branch has finished — used at session end
 /// so nothing started under `! CONCURRENTLY` is left unreported.
-fn join_all(pending: PendingBranches) {
-    for (_, description, mut branch) in pending {
+fn join_all(rt: &mut Runtime, session: &mut Session) {
+    for (_, description, mut branch) in std::mem::take(&mut rt.pending) {
         let outcome = block_until_resolved(&description, &mut branch);
         print_outcome(Some(&description), &outcome);
+        rt.record(session, &outcome);
     }
 }
 
@@ -910,25 +895,24 @@ fn print_outcome(branch: Option<&str>, outcome: &ExecutionOutcome) {
 }
 
 /// Plans and dispatches `plan_outcome` — shared by `£` commands and
-/// `@ TELL` blocks, which differ only in how they got a `PlanOutcome`.
-/// Updates `session`'s recorded outcome and `last_result` for anything
+/// `@` blocks, which differ only in how they got a `PlanOutcome`.
+/// Updates `session`'s recorded outcome and `rt.last_result` for anything
 /// that actually ran (or failed to even submit); a plan that turned out
-/// `Unsupported` touches neither, since nothing executed at all.
-#[allow(clippy::too_many_arguments)]
+/// `Unsupported` ran nothing, but still counts as a failure for batch
+/// mode's exit status.
 fn dispatch(
     plan_outcome: PlanOutcome,
     budget: xact_ast::ResourceBudget,
     description: String,
     concurrent: bool,
     session: &mut Session,
-    pending: &mut PendingBranches,
-    next_branch_id: &mut u64,
-    last_result: &mut LastResult,
+    rt: &mut Runtime,
 ) {
     let plan = match plan_outcome {
         PlanOutcome::Plan(plan) => plan,
         PlanOutcome::Unsupported(reason) => {
             println!("  {reason}");
+            rt.failures += 1;
             return;
         }
     };
@@ -936,69 +920,88 @@ fn dispatch(
     if concurrent {
         match xact_executor::execute_concurrent(plan, budget) {
             Ok(branch) => {
-                let id = *next_branch_id;
-                *next_branch_id += 1;
-                println!("  queued as an independent branch ({} in flight)", pending.len() + 1);
-                pending.push((id, description, branch));
-                *last_result = LastResult::Pending(id);
+                let id = rt.next_branch_id;
+                rt.next_branch_id += 1;
+                println!("  queued as an independent branch ({} in flight)", rt.pending.len() + 1);
+                rt.pending.push((id, description, branch));
+                rt.last_result = LastResult::Pending(id);
             }
             Err(outcome) => {
                 print_outcome(None, &outcome);
-                session.record_outcome(outcome_succeeded(&outcome));
-                *last_result = LastResult::Resolved;
+                rt.record(session, &outcome);
+                rt.last_result = LastResult::Resolved;
             }
         }
     } else {
         let outcome = xact_executor::execute(plan, budget);
         print_outcome(None, &outcome);
-        session.record_outcome(outcome_succeeded(&outcome));
-        *last_result = LastResult::Resolved;
+        rt.record(session, &outcome);
+        rt.last_result = LastResult::Resolved;
     }
 }
 
-/// Accumulates a `@` block's continuation lines (spec section 9's example
-/// layout) onto `first_line`, pulling further lines from `next_line`
-/// until a blank line or `next_line` itself runs out. The accumulation
-/// rule doesn't care where a line came from, so this is the one place it
-/// lives — [`run_interactive`] pulls continuation lines live from the
-/// line editor, [`run_batch`] pulls them from a script file or a `-c`
-/// string, and both just hand this function a closure.
-fn accumulate_agent_block(first_line: &str, mut next_line: impl FnMut() -> Option<String>) -> String {
-    let mut input = first_line.to_string();
-    if first_line.trim_start().starts_with('@') {
-        while let Some(cont) = next_line() {
-            let cont = cont.trim().to_string();
-            if cont.is_empty() {
-                break;
+/// Splits a non-interactive program into its statements. A statement
+/// starts at a line whose first non-blank character is `£`, `!`, or `@`
+/// (or at any non-blank line when no statement is open yet, so stray text
+/// is reported rather than swallowed); every other line continues the
+/// statement above it, so a `£`/`!`/`@` statement may span lines exactly as
+/// it can at the interactive prompt. A line reading `exit` or `quit` ends
+/// the program. Returns `(first line number, statement text)` pairs.
+fn split_statements(text: &str) -> Vec<(usize, String)> {
+    let mut statements: Vec<(usize, String)> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if is_exit_word(trimmed) {
+            break;
+        }
+        let starts_statement = trimmed.starts_with(['£', '!', '@']);
+        match statements.last_mut() {
+            Some((_, current)) if !starts_statement => {
+                current.push('\n');
+                current.push_str(line);
             }
-            input.push(' ');
-            input.push_str(&cont);
+            _ if trimmed.is_empty() => {}
+            _ => statements.push((index + 1, line.to_string())),
         }
     }
-    input
+    for (_, statement) in &mut statements {
+        let end = statement.trim_end().len();
+        statement.truncate(end);
+    }
+    statements
 }
 
-/// Submits one already-accumulated input (a single `£`/`!`/`@` line, or a
-/// multi-line `@` block already joined by [`accumulate_agent_block`])
-/// through the real validate → plan → dispatch pipeline, and prints the
-/// same outcome lines either caller (interactive or batch) would show.
-/// Bound to a plain `let` rather than matched inline: `match` extends a
-/// scrutinee's temporaries across every arm, so an inline
-/// `match session.lock().unwrap().submit(input) { ... }` would hold the
-/// lock for the whole match — including the arms below that lock
-/// `session` again, which would deadlock (a `Mutex` isn't reentrant).
-/// Binding first drops the guard the instant `submit` returns its owned
-/// `SessionOutcome`.
-fn process_submitted_input(
-    input: &str,
-    session: &Arc<Mutex<Session>>,
-    pending: &mut PendingBranches,
-    next_branch_id: &mut u64,
-    last_result: &mut LastResult,
-) {
+/// Validates every statement of a block against a throwaway copy of
+/// `session`, without planning or executing anything (spec section 18: an
+/// invalid block never executes, not even its valid prefix). Each
+/// statement is checked against the state the ones before it would
+/// establish, exactly as the real run will see it. Returns every problem
+/// found, each with the line it starts on.
+fn validate_block(session: &Session, statements: &[(usize, String)]) -> Vec<(usize, String)> {
+    let mut dry_run = session.clone();
+    let mut problems = Vec::new();
+    for (line, statement) in statements {
+        match dry_run.submit(statement) {
+            SessionOutcome::Accepted(..) | SessionOutcome::PolicyAccepted(_) | SessionOutcome::AgentAccepted(_) => {}
+            SessionOutcome::Incomplete(diag) => problems.push((*line, format!("incomplete statement — {diag}"))),
+            SessionOutcome::Rejected(diagnostics) => {
+                problems.extend(diagnostics.into_iter().map(|diag| (*line, diag.to_string())));
+            }
+        }
+    }
+    problems
+}
+
+/// Submits one complete statement through the real validate → plan →
+/// dispatch pipeline and prints the outcome lines. Bound to a plain `let`
+/// rather than matched inline: `match` extends a scrutinee's temporaries
+/// across every arm, so an inline `match session.lock().unwrap().submit(..)`
+/// would hold the lock for the whole match — including the arms below that
+/// lock `session` again, which would deadlock (a `Mutex` isn't reentrant).
+fn process_submitted_input(input: &str, session: &Arc<Mutex<Session>>, rt: &mut Runtime) {
     let outcome = session.lock().unwrap().submit(input);
     match outcome {
-        SessionOutcome::Accepted(command) => {
+        SessionOutcome::Accepted(command, references) => {
             let description = describe(&command);
             println!("accepted: {description}");
 
@@ -1008,9 +1011,9 @@ fn process_submitted_input(
             };
 
             if let Some(dependency) = dependency {
-                if let LastResult::Pending(id) = *last_result {
-                    resolve_branch_now(id, pending, &mut session.lock().unwrap());
-                    *last_result = LastResult::Resolved;
+                if let LastResult::Pending(id) = rt.last_result {
+                    resolve_branch_now(id, rt, &mut session.lock().unwrap());
+                    rt.last_result = LastResult::Resolved;
                 }
                 if !session.lock().unwrap().dependency_satisfied(&dependency) {
                     println!(
@@ -1022,55 +1025,48 @@ fn process_submitted_input(
                 }
             }
 
-            let plan_outcome = xact_planner::plan(&command, session.lock().unwrap().references());
-            let budget = session.lock().unwrap().resource_budget();
-            let concurrent = session.lock().unwrap().schedule() == Some(PolicyOperator::Concurrently);
-            dispatch(
-                plan_outcome,
-                budget,
-                description,
-                concurrent,
-                &mut session.lock().unwrap(),
-                pending,
-                next_branch_id,
-                last_result,
-            );
+            let (plan_outcome, budget, concurrent) = {
+                let session = session.lock().unwrap();
+                (
+                    xact_planner::plan(&command, &references, session.owner_roots()),
+                    session.resource_budget(),
+                    session.schedule() == Some(PolicyOperator::Concurrently),
+                )
+            };
+            dispatch(plan_outcome, budget, description, concurrent, &mut session.lock().unwrap(), rt);
         }
         SessionOutcome::PolicyAccepted(stmt) => {
             println!("policy set: {}", describe_policy(&stmt));
-            let already_enforced = matches!(
-                stmt.operator,
-                PolicyOperator::Concurrently
-                    | PolicyOperator::Consecutively
-                    | PolicyOperator::Spend
-                    | PolicyOperator::Save
-            );
-            if !already_enforced {
-                println!("  (not yet enforced — the planner/executor are not implemented yet.)");
+            match stmt.operator {
+                PolicyOperator::With => println!("  (checked: available on this host now.)"),
+                PolicyOperator::Prefer | PolicyOperator::Dodge => println!(
+                    "  (advisory: no operation Xact plans today has an alternative for this preference to choose between.)"
+                ),
+                _ => {}
             }
         }
         SessionOutcome::AgentAccepted(block) => {
             let description = describe_agent(&block);
             println!("agent intent accepted: {description}");
-            let plan_outcome = xact_planner::plan_agent(&block, session.lock().unwrap().references());
-            let budget = session.lock().unwrap().resource_budget();
-            let concurrent = session.lock().unwrap().schedule() == Some(PolicyOperator::Concurrently);
-            dispatch(
-                plan_outcome,
-                budget,
-                description,
-                concurrent,
-                &mut session.lock().unwrap(),
-                pending,
-                next_branch_id,
-                last_result,
-            );
+            let (plan_outcome, budget, concurrent) = {
+                let session = session.lock().unwrap();
+                (
+                    xact_planner::plan_agent(&block, session.references(), session.owner_roots()),
+                    session.resource_budget(),
+                    session.schedule() == Some(PolicyOperator::Concurrently),
+                )
+            };
+            dispatch(plan_outcome, budget, description, concurrent, &mut session.lock().unwrap(), rt);
         }
-        SessionOutcome::Incomplete(diag) => print!("{diag}"),
+        SessionOutcome::Incomplete(diag) => {
+            print!("{diag}");
+            rt.failures += 1;
+        }
         SessionOutcome::Rejected(diagnostics) => {
             for diag in diagnostics {
                 print!("{diag}");
             }
+            rt.failures += 1;
         }
     }
 }
@@ -1084,11 +1080,16 @@ fn process_submitted_input(
 /// whole: no separate continuation-reading step like [`run_batch`] needs.
 fn run_interactive(vi_mode: bool) {
     println!(
-        "xact 0.1.0 — grammar, ownership, reference, policy, and agent validation; CREATE, SEE, and RUN actually run"
+        "xact {} — type a £ command, a ! policy statement, an @ agent block, or 'exit'.",
+        env!("CARGO_PKG_VERSION")
     );
-    println!("Type a £ command, a ! policy statement, an @ agent block, or 'exit'.");
     println!("Suggestions narrow live as you type; invalid input is highlighted in red;");
     println!("Enter submits once the line is runnable, Shift+Enter always adds a line break.");
+
+    // Starts the agent-model catalog refresh in the background, so the
+    // first `@ TELL` menu is usually already populated without completion
+    // ever waiting on a provider.
+    xact_core::prewarm_completion();
 
     // `Session` is shared (not owned outright) by this loop: `XactCompleter`
     // (inside `line_editor`) needs read access to the same live policy
@@ -1098,72 +1099,65 @@ fn run_interactive(vi_mode: bool) {
     let session = Arc::new(Mutex::new(Session::new()));
     let mut line_editor = build_line_editor(Arc::clone(&session), vi_mode);
     let prompt = XactPrompt::new();
-
-    let mut pending: PendingBranches = Vec::new();
-    let mut next_branch_id: u64 = 0;
-    let mut last_result = LastResult::Resolved;
+    let mut rt = Runtime::new();
 
     loop {
-        drain_ready(&mut pending, &mut session.lock().unwrap(), &mut last_result);
+        drain_ready(&mut rt, &mut session.lock().unwrap());
 
         let line = match line_editor.read_line(&prompt) {
             Ok(Signal::Success(buffer)) => buffer.trim_end().to_string(),
             Ok(Signal::CtrlC) => continue,
-            Ok(Signal::CtrlD) | Err(_) => {
-                join_all(pending);
-                break;
-            }
+            Ok(Signal::CtrlD) | Err(_) => break,
         };
         if line.is_empty() {
             continue;
         }
         if is_exit_word(&line) {
-            join_all(pending);
             break;
         }
 
-        process_submitted_input(&line, &session, &mut pending, &mut next_branch_id, &mut last_result);
+        process_submitted_input(&line, &session, &mut rt);
     }
+    join_all(&mut rt, &mut session.lock().unwrap());
 }
 
-/// Runs `lines` non-interactively — no line editor, no completion, just
-/// the same `Session::submit` → plan → dispatch pipeline
-/// [`run_interactive`] uses, driven straight off an iterator of already
-/// -typed lines instead of a live terminal. No scripting constructs
-/// (variables, loops, `&&`) exist to run here — this is a second way to
-/// feed the same real language sequentially, for `-c`/a script file (see
-/// `parse_args`), not a scripting layer. There's no live editor here to
-/// gate Enter on runnability, so `@` blocks still accumulate continuation
-/// lines the older explicit way (see [`accumulate_agent_block`]) instead
-/// of relying on embedded newlines the way [`run_interactive`] now can;
-/// `exit`/`quit` end the run early, matching the interactive REPL's own
-/// convention.
-fn run_batch(lines: impl Iterator<Item = String>) {
+/// Exit status when a block was rejected before anything ran.
+const EXIT_INVALID: i32 = 2;
+/// Exit status when the block ran but some command did not succeed.
+const EXIT_FAILED: i32 = 1;
+
+/// Runs a whole non-interactive program (`-c`, a script file, or piped
+/// stdin) as one block: every statement is validated first (see
+/// [`validate_block`]) and nothing runs unless all of them pass. It then
+/// runs through the same `Session::submit` → plan → dispatch pipeline the
+/// REPL uses. Returns the process exit status: 0 when every command
+/// succeeded, [`EXIT_FAILED`] when any did not (a `WHEN` skip is control
+/// flow, not a failure), [`EXIT_INVALID`] when the block was rejected.
+fn run_batch(text: &str) -> i32 {
+    let statements = split_statements(text);
     let session = Arc::new(Mutex::new(Session::new()));
-    let mut pending: PendingBranches = Vec::new();
-    let mut next_branch_id: u64 = 0;
-    let mut last_result = LastResult::Resolved;
-    let mut lines = lines;
 
-    loop {
-        drain_ready(&mut pending, &mut session.lock().unwrap(), &mut last_result);
-
-        let Some(line) = lines.next() else {
-            break;
-        };
-        let line = line.trim_end().to_string();
-        if line.is_empty() {
-            continue;
+    let problems = validate_block(&session.lock().unwrap(), &statements);
+    if !problems.is_empty() {
+        eprintln!("xact: nothing was run — {} problem(s) in this block:", problems.len());
+        for (line, problem) in problems {
+            eprintln!("line {line}: {}", problem.trim_end());
         }
-        if is_exit_word(&line) {
-            break;
-        }
-
-        let input = accumulate_agent_block(&line, || lines.next());
-        process_submitted_input(&input, &session, &mut pending, &mut next_branch_id, &mut last_result);
+        return EXIT_INVALID;
     }
 
-    join_all(pending);
+    let mut rt = Runtime::new();
+    for (_, statement) in &statements {
+        drain_ready(&mut rt, &mut session.lock().unwrap());
+        process_submitted_input(statement, &session, &mut rt);
+    }
+    join_all(&mut rt, &mut session.lock().unwrap());
+
+    if rt.failures == 0 {
+        0
+    } else {
+        EXIT_FAILED
+    }
 }
 
 /// What to run and how, from `argv`: `xact` alone starts the interactive
@@ -1215,17 +1209,31 @@ fn main() {
     // ordinary (if unsuccessful) outcome.
     ctrlc::set_handler(xact_cancel::cancel_all).expect("failed to install CTRL-C handler");
 
-    match parse_args() {
-        RunMode::Interactive { vi_mode } => run_interactive(vi_mode),
-        RunMode::Command(command) => run_batch(command.lines().map(str::to_string)),
+    let status = match parse_args() {
+        // No arguments but input piped in: run it as a script rather than
+        // starting a line editor that would silently ignore it.
+        RunMode::Interactive { .. } if !std::io::stdin().is_terminal() => {
+            let mut text = String::new();
+            if let Err(err) = std::io::stdin().read_to_string(&mut text) {
+                eprintln!("xact: cannot read standard input: {err}");
+                std::process::exit(EXIT_FAILED);
+            }
+            run_batch(&text)
+        }
+        RunMode::Interactive { vi_mode } => {
+            run_interactive(vi_mode);
+            0
+        }
+        RunMode::Command(command) => run_batch(&command),
         RunMode::File(path) => {
             let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
                 eprintln!("xact: cannot read {}: {e}", path.display());
-                std::process::exit(1);
+                std::process::exit(EXIT_FAILED);
             });
-            run_batch(content.lines().map(str::to_string));
+            run_batch(&content)
         }
-    }
+    };
+    std::process::exit(status);
 }
 
 fn describe(command: &Command) -> String {
@@ -1302,12 +1310,47 @@ fn describe_agent(block: &AgentBlock) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn statements_start_at_a_sigil_and_continue_otherwise() {
+        let text = "! SAVE 20%CPU\n\n£ COPY MY /tmp/a\n    to MY /tmp/b\n@ TELL 'm'\n  \"say hi\"\nexit\n£ RUN 'never'";
+        let statements = split_statements(text);
+        assert_eq!(
+            statements,
+            vec![
+                (1, "! SAVE 20%CPU".to_string()),
+                (3, "£ COPY MY /tmp/a\n    to MY /tmp/b".to_string()),
+                (5, "@ TELL 'm'\n  \"say hi\"".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn stray_text_before_any_statement_is_kept_so_it_gets_reported() {
+        assert_eq!(split_statements("hello\n£ SEE MY /tmp"), vec![(1, "hello".into()), (2, "£ SEE MY /tmp".into())]);
+    }
+
+    #[test]
+    fn an_invalid_later_line_blocks_the_whole_block() {
+        let statements = split_statements("£ CREATE MY /tmp/xact-block-test-never\n£ COPY THAT\n£ BOGUS");
+        let problems = validate_block(&Session::new(), &statements);
+        let lines: Vec<usize> = problems.iter().map(|(line, _)| *line).collect();
+        assert!(lines.contains(&2) && lines.contains(&3), "{problems:?}");
+        assert!(!std::path::Path::new("/tmp/xact-block-test-never").exists());
+    }
+
     /// The forced picker's candidate source, exactly as the live menu
     /// will call it: right after `@ TELL`'s space, the full deterministic
     /// list is offered with the span sitting at the pure insertion point
     /// the trailing space left behind.
     #[test]
+    #[ignore = "live: requires ollama with at least one model pulled"]
     fn model_menu_completer_forces_the_full_list_right_after_tell() {
+        // The catalog fills in the background (it never blocks the
+        // editor), so wait for it to warm before comparing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while agent_model_selection("@ TELL ").is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let mut completer = ModelMenuCompleter;
         let suggestions = completer.complete("@ TELL ", "@ TELL ".len());
         let expected = agent_model_selection("@ TELL ");

@@ -278,13 +278,19 @@ mod tests {
         xact_cancel::reset();
     }
 
+    /// Writes an executable stub through a child shell, so this (heavily
+    /// multi-threaded) test process never holds a writable fd to it: if it
+    /// did, a sibling test's concurrent `fork` could inherit that fd and
+    /// make exec'ing the stub fail with ETXTBSY ("Text file busy").
     fn write_stub(dir: &std::path::Path, name: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let script = dir.join(name);
-        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
+        let status = Command::new("sh")
+            .args(["-c", "printf '#!/bin/sh\\nexit 0\\n' > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to write stub {}", script.display());
         dir.to_path_buf()
     }
 

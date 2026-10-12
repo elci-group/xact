@@ -392,38 +392,41 @@ pub fn run_process_async(
 /// Establishes `path` behind the Mesut adapter (`£ CREATE`'s execution
 /// path). `xact-bank` still owns `bank -p <path>` and its file/directory
 /// disambiguation.
-pub fn establish_path(path: PathBuf) -> Result<PathBuf, AdapterError> {
-    establish_path_async(path)?.join()
+pub fn establish_path(path: PathBuf, budget: xact_ast::ResourceBudget) -> Result<PathBuf, AdapterError> {
+    establish_path_async(path, budget)?.join()
 }
 
 /// Same as [`establish_path`], but returns immediately as an independent
 /// branch.
-pub fn establish_path_async(path: PathBuf) -> Result<PendingTask<PathBuf>, AdapterError> {
-    submit("xact.create", move || xact_bank::establish(&path).map_err(|err| err.to_string()))
+pub fn establish_path_async(
+    path: PathBuf,
+    budget: xact_ast::ResourceBudget,
+) -> Result<PendingTask<PathBuf>, AdapterError> {
+    submit("xact.create", move || xact_bank::establish(&path, &budget).map_err(|err| err.to_string()))
 }
 
 /// Shows a directory with `gls` behind the Mesut adapter (`£ SEE`'s
 /// directory routing).
-pub fn view_directory(path: PathBuf) -> Result<(), AdapterError> {
-    view_directory_async(path)?.join()
+pub fn view_directory(path: PathBuf, budget: xact_ast::ResourceBudget) -> Result<(), AdapterError> {
+    view_directory_async(path, budget)?.join()
 }
 
 /// Same as [`view_directory`], but returns immediately as an independent
 /// branch.
-pub fn view_directory_async(path: PathBuf) -> Result<PendingTask<()>, AdapterError> {
-    submit("xact.see.directory", move || xact_see::view_directory(&path).map_err(|err| err.to_string()))
+pub fn view_directory_async(path: PathBuf, budget: xact_ast::ResourceBudget) -> Result<PendingTask<()>, AdapterError> {
+    submit("xact.see.directory", move || xact_see::view_directory(&path, &budget).map_err(|err| err.to_string()))
 }
 
 /// Shows a file with `bat` behind the Mesut adapter (`£ SEE`'s file
 /// routing).
-pub fn view_file(path: PathBuf) -> Result<(), AdapterError> {
-    view_file_async(path)?.join()
+pub fn view_file(path: PathBuf, budget: xact_ast::ResourceBudget) -> Result<(), AdapterError> {
+    view_file_async(path, budget)?.join()
 }
 
 /// Same as [`view_file`], but returns immediately as an independent
 /// branch.
-pub fn view_file_async(path: PathBuf) -> Result<PendingTask<()>, AdapterError> {
-    submit("xact.see.file", move || xact_see::view_file(&path).map_err(|err| err.to_string()))
+pub fn view_file_async(path: PathBuf, budget: xact_ast::ResourceBudget) -> Result<PendingTask<()>, AdapterError> {
+    submit("xact.see.file", move || xact_see::view_file(&path, &budget).map_err(|err| err.to_string()))
 }
 
 /// Aggregates `source` behind the Mesut adapter (`£ BOUND`'s execution
@@ -572,7 +575,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let target = dir.join("nested/dir/");
 
-        let result = establish_path(target.clone());
+        let result = establish_path(target.clone(), xact_ast::ResourceBudget::default());
 
         assert_eq!(result.expect("bank should succeed"), target);
         assert!(dir.join("nested/dir").is_dir());
@@ -583,7 +586,7 @@ mod tests {
     #[test]
     #[ignore = "live: requires gls"]
     fn view_directory_runs_gls_through_the_adapter() {
-        let result = view_directory(std::env::temp_dir());
+        let result = view_directory(std::env::temp_dir(), xact_ast::ResourceBudget::default());
         assert!(result.is_ok(), "gls is expected to be installed and to succeed: {result:?}");
     }
 

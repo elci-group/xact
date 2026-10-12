@@ -4,11 +4,17 @@
 //! An unresolved reference is a semantic error and must never reach
 //! execution (the reference invariant, spec section 27).
 //!
-//! Phase 1 models the conceptual pipeline `ObjectRef -> ResolvedObject`
-//! only; the further step to a `TypedResource` (spec section 11's diagram)
-//! — knowing a resolved object is specifically a file, directory, or
-//! process — is deferred to the semantic/executor phases once there is a
-//! real filesystem/process layer to type-check against.
+//! `THIS` and `THAT` are distinct (decision D-2 in
+//! `XACT_COMPLETION_DIRECTIVE.md`): after any command, `THAT` is what it
+//! produced — its destination, or its target when it has none — and `THIS`
+//! is what it consumed — its source operand. `£ COPY MY ~/a to MY ~/b`
+//! leaves `THIS` = `~/a` and `THAT` = `~/b`; for a single-operand command
+//! such as `£ SEE MY ~/x` both name the same object. Every spec example
+//! (`£ SEE ...` then `£ EDIT THAT`, `WHEN THAT SUCCEEDS`) reads as before.
+//!
+//! The further step to a `TypedResource` (spec section 11's diagram) —
+//! knowing a resolved object is specifically a file, directory, or process
+//! — is still future work (directive M2.2).
 
 use xact_ast::ReferenceKind;
 
@@ -18,18 +24,12 @@ pub enum ResolvedObject {
     Text(String),
 }
 
-/// Tracks the most recently established object so that a later `THIS`/
-/// `THAT` can resolve against it (spec section 11 example: `SEE MY
-/// ~/project/README.md` followed by `EDIT THAT`).
-///
-/// Phase 1 does not yet distinguish `THIS` (the object just established in
-/// the current command) from `THAT` (an earlier result) — both resolve to
-/// the single most recent object. Disambiguating them needs a real
-/// multi-object session history, which belongs to `xact-core` in a later
-/// phase.
+/// The input and result of the most recent command that established an
+/// object (see the module doc).
 #[derive(Debug, Clone, Default)]
 pub struct ReferenceContext {
-    last: Option<ResolvedObject>,
+    input: Option<ResolvedObject>,
+    result: Option<ResolvedObject>,
 }
 
 impl ReferenceContext {
@@ -37,12 +37,18 @@ impl ReferenceContext {
         Self::default()
     }
 
-    pub fn resolve(&self, _kind: ReferenceKind) -> Option<&ResolvedObject> {
-        self.last.as_ref()
+    /// `THIS` resolves to the last command's input, `THAT` to its result.
+    pub fn resolve(&self, kind: ReferenceKind) -> Option<&ResolvedObject> {
+        match kind {
+            ReferenceKind::This => self.input.as_ref(),
+            ReferenceKind::That => self.result.as_ref(),
+        }
     }
 
-    pub fn record(&mut self, object: ResolvedObject) {
-        self.last = Some(object);
+    /// Records a command that consumed `input` and produced `result`.
+    pub fn record(&mut self, input: ResolvedObject, result: ResolvedObject) {
+        self.input = Some(input);
+        self.result = Some(result);
     }
 }
 
@@ -59,7 +65,19 @@ mod tests {
     #[test]
     fn resolves_after_recording() {
         let mut ctx = ReferenceContext::new();
-        ctx.record(ResolvedObject::Path("~/project/README.md".into()));
-        assert_eq!(ctx.resolve(ReferenceKind::That), Some(&ResolvedObject::Path("~/project/README.md".into())));
+        let readme = ResolvedObject::Path("/home/u/project/README.md".into());
+        ctx.record(readme.clone(), readme.clone());
+        assert_eq!(ctx.resolve(ReferenceKind::That), Some(&readme));
+        assert_eq!(ctx.resolve(ReferenceKind::This), Some(&readme));
+    }
+
+    #[test]
+    fn this_is_the_input_and_that_is_the_result() {
+        let mut ctx = ReferenceContext::new();
+        let source = ResolvedObject::Path("/home/u/a".into());
+        let destination = ResolvedObject::Path("/home/u/b".into());
+        ctx.record(source.clone(), destination.clone());
+        assert_eq!(ctx.resolve(ReferenceKind::This), Some(&source));
+        assert_eq!(ctx.resolve(ReferenceKind::That), Some(&destination));
     }
 }

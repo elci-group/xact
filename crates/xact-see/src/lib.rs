@@ -17,6 +17,8 @@ use std::fmt;
 use std::path::Path;
 use std::process::Command;
 
+use xact_ast::ResourceBudget;
+
 #[derive(Debug)]
 pub struct SeeError(String);
 
@@ -28,16 +30,23 @@ impl fmt::Display for SeeError {
 
 impl std::error::Error for SeeError {}
 
-pub fn view_directory(path: &Path) -> Result<(), SeeError> {
-    run("gls", path)
+/// Shows a directory with `gls`, under `budget`'s quotas and capability
+/// denials like every other process an executed command spawns.
+pub fn view_directory(path: &Path, budget: &ResourceBudget) -> Result<(), SeeError> {
+    run("gls", path, budget)
 }
 
-pub fn view_file(path: &Path) -> Result<(), SeeError> {
-    run("bat", path)
+/// Shows a file with `bat`, under `budget` (see [`view_directory`]).
+pub fn view_file(path: &Path, budget: &ResourceBudget) -> Result<(), SeeError> {
+    run("bat", path, budget)
 }
 
-fn run(tool: &str, path: &Path) -> Result<(), SeeError> {
-    let status = Command::new(tool).arg(path).status().map_err(|e| SeeError(format!("failed to run {tool}: {e}")))?;
+fn run(tool: &str, path: &Path, budget: &ResourceBudget) -> Result<(), SeeError> {
+    let mut command = Command::new(tool);
+    command.arg(path);
+    let _resource_guard = xact_resource::apply(&mut command, budget)
+        .map_err(|err| SeeError(format!("cannot honour the active resource policy: {err}")))?;
+    let status = command.status().map_err(|e| SeeError(format!("failed to run {tool}: {e}")))?;
 
     if status.success() {
         Ok(())
@@ -73,7 +82,7 @@ mod tests {
     #[ignore = "live: requires gls and bat"]
     fn see_adapter_dispatches_by_tool_name() {
         assert!(
-            view_directory(&std::env::temp_dir()).is_ok(),
+            view_directory(&std::env::temp_dir(), &ResourceBudget::default()).is_ok(),
             "gls is expected to be installed and to succeed on a real directory"
         );
 
@@ -85,17 +94,23 @@ mod tests {
         std::fs::write(&file, "hello").unwrap();
 
         std::env::set_var("PATH", format!("{}:{}", ok_dir.display(), original_path));
-        assert!(view_file(&file).is_ok(), "a zero-exit stub should be reported as success");
+        assert!(view_file(&file, &ResourceBudget::default()).is_ok(), "a zero-exit stub should be reported as success");
 
         let fail_dir = std::env::temp_dir().join(format!("xact-see-stub-fail-{}", std::process::id()));
         write_stub(&fail_dir, "bat", 1);
         std::env::set_var("PATH", format!("{}:{}", fail_dir.display(), original_path));
-        assert!(view_file(&file).is_err(), "a nonzero-exit stub should be reported as failure");
+        assert!(
+            view_file(&file, &ResourceBudget::default()).is_err(),
+            "a nonzero-exit stub should be reported as failure"
+        );
 
         let empty_dir = std::env::temp_dir().join(format!("xact-see-empty-path-{}", std::process::id()));
         std::fs::create_dir_all(&empty_dir).unwrap();
         std::env::set_var("PATH", &empty_dir);
-        assert!(view_file(&file).is_err(), "a missing tool should be reported as failure, not panic");
+        assert!(
+            view_file(&file, &ResourceBudget::default()).is_err(),
+            "a missing tool should be reported as failure, not panic"
+        );
 
         std::env::set_var("PATH", original_path);
         let _ = std::fs::remove_file(&file);
