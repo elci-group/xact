@@ -1,0 +1,32 @@
+# ELCI project manifest — ELCI-RGCA-001 §5
+# Provisional (Phase 1 machine draft). Human review required for Tier-S/A.
+schema_version = "1.0"
+
+[project]
+id = "xact"
+name = "xact"
+descriptor = "Deterministic, semantic shell for the ELci ecosystem: you type human-oriented commands in a small typed language, a deterministic grammar validates ownership, references, capability and resource policy before anything runs, then it executes for real by composing sibling ELci tools like bank, bound and bat, plus local agents."
+status = "experimental"
+maturity = "prototype"
+class = "developer-tool"
+
+[ownership]
+organisation = "elci-group"
+maintainer = "ELCI Group"
+
+[architecture]
+independent_boundary = true
+boundary_reason = "Provisional Phase 1 classification (tier C); pending §17 rationalisation review."
+parent = []
+capabilities = []
+consumers = []
+
+[authority]
+human_write_authority = true
+agent_write_authority = false
+autonomous_operation = false
+
+[lifecycle]
+introduced = "2026"
+supersedes = []
+superseded_by = []
