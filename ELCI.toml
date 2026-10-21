@@ -1,0 +1,35 @@
+# Staged by portfolio alignment 2026-10-20; NOT yet written to the repository.
+# Requires human review (§38): class, maturity, and relationships are proposals.
+schema = 1
+
+[project]
+name = "xact"
+class = "tool"
+maturity = "M1"
+status = "active"
+description = "Deterministic, semantic shell for the ELci ecosystem: you type human-oriented commands in a small typed language, a deterministic grammar validates ownership, references, capability and resource policy before anything runs, then it executes for real by composing sibling ELci tools like bank, bound and bat, plus local agents."
+owner = "elci-group"
+criticality = "low"
+
+[interfaces]
+cli = true
+library = false
+http = false
+event_producer = false   # TODO confirm (§10)
+event_consumer = false   # TODO confirm (§10)
+
+[portfolio]
+supersedes = []
+superseded_by = []
+related = []
+depends_on = ["mesut", "padagonia"]
+consumed_by = []         # TODO populate (§23)
+
+[maintenance]
+review_interval_days = 60
+last_reviewed = "2026-10-20"
+
+# Central extension (ELCI-PH-001 §5 allows; satisfies §19/§31)
+[language]
+edition = "2021"
+version = "0.1.0"
